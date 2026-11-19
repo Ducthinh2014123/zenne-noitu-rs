@@ -1,0 +1,16 @@
+[package]
+name = "zenne-games"
+version = "2.0.0"
+edition = "2021"
+
+[dependencies]
+zenne-core = { path = "../zenne-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+dashmap.workspace = true
+chrono.workspace = true
+once_cell.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "zenne-music"
+version = "2.0.0"
+edition = "2021"
+
+[dependencies]
+zenne-core = { path = "../zenne-core" }
+tokio.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+regex.workspace = true
+url.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serenity.workspace = true
+songbird.workspace = true
+symphonia.workspace = true

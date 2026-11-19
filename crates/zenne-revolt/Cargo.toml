@@ -1,0 +1,17 @@
+[package]
+name = "zenne-revolt"
+version = "2.0.0"
+edition = "2021"
+
+[dependencies]
+zenne-core = { path = "../zenne-core" }
+zenne-games = { path = "../zenne-games" }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+tracing.workspace = true
+anyhow.workspace = true

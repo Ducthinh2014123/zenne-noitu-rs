@@ -1,0 +1,181 @@
+use dashmap::DashMap;
+use poise::serenity_prelude as serenity;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use zenne_core::{i18n, wiki, AppContext};
+
+#[derive(Debug, Clone)]
+pub struct WordChainRoom {
+    pub active: bool,
+    pub players: Vec<u64>,
+    pub turn_idx: usize,
+    pub last_word: String,
+    pub used: HashSet<String>,
+    pub scores: HashMap<u64, u32>,
+    pub round: u32,
+    pub bot_mode: bool,
+}
+
+impl Default for WordChainRoom {
+    fn default() -> Self {
+        Self {
+            active: false,
+            players: Vec::new(),
+            turn_idx: 0,
+            last_word: String::new(),
+            used: HashSet::new(),
+            scores: HashMap::new(),
+            round: 0,
+            bot_mode: false,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct NoituManager {
+    pub rooms: Arc<DashMap<u64, Arc<Mutex<WordChainRoom>>>>,
+}
+
+impl NoituManager {
+    pub fn get_room(&self, channel_id: u64) -> Arc<Mutex<WordChainRoom>> {
+        self.rooms
+            .entry(channel_id)
+            .or_insert_with(|| Arc::new(Mutex::new(WordChainRoom::default())))
+            .clone()
+    }
+}
+
+pub async fn handle_word_message(
+    ctx_ser: &serenity::Context,
+    msg: &serenity::Message,
+    app: &AppContext,
+    noitu: &NoituManager,
+) -> bool {
+    let ch_id = msg.channel_id.get();
+    let Some(room_arc) = noitu.rooms.get(&ch_id).map(|r| r.clone()) else {
+        return false;
+    };
+
+    let word = wiki::normalize_word(&msg.content);
+    if word.is_empty() || word.starts_with('!') || word.starts_with('/') {
+        return false;
+    }
+
+    let guild_id = msg.guild_id.map(|g| g.get() as i64).unwrap_or(0);
+    let lang = app.db.get_lang(guild_id).await;
+    let ui_lang = app.db.get_ui_lang(guild_id).await;
+    let uid = msg.author.id.get();
+
+    let room = room_arc.lock().await;
+    if !room.active {
+        return false;
+    }
+
+    if !room.players.is_empty()
+        && room.players[room.turn_idx % room.players.len()] != uid
+        && !room.bot_mode
+    {
+        return false;
+    }
+
+    if !room.last_word.is_empty() && !wiki::valid_chain(&room.last_word, &word, &lang) {
+        let req_syl = wiki::last_syl(&room.last_word, &lang);
+        let reply = i18n::t(
+            &ui_lang,
+            "wrong_chain",
+            &[
+                ("name", &msg.author.name),
+                ("word", &word),
+                ("syl", &req_syl),
+                ("hint", ""),
+            ],
+        );
+        let _ = msg.reply(&ctx_ser.http, reply).await;
+        return true;
+    }
+
+    if room.used.contains(&word) {
+        let reply = i18n::t(&ui_lang, "word_used", &[("word", &word)]);
+        let _ = msg.reply(&ctx_ser.http, reply).await;
+        return true;
+    }
+
+    drop(room);
+    let (valid, _extract) =
+        wiki::check_word(&app.http, &app.db, &app.cache, guild_id, &lang, &word).await;
+
+    let mut room = room_arc.lock().await;
+    if !room.active {
+        return false;
+    }
+
+    if !valid {
+        let langname = i18n::lang_display_name(&lang);
+        let reply = i18n::t(
+            &ui_lang,
+            "wiki_not_found",
+            &[("word", &word), ("langname", &langname), ("hint", "")],
+        );
+        let _ = msg.reply(&ctx_ser.http, reply).await;
+        return true;
+    }
+
+    room.used.insert(word.clone());
+    room.last_word = word.clone();
+    room.round += 1;
+    *room.scores.entry(uid).or_insert(0) += 1;
+    if !room.players.contains(&uid) {
+        room.players.push(uid);
+    }
+    if !room.players.is_empty() {
+        room.turn_idx = (room.turn_idx + 1) % room.players.len();
+    }
+
+    let next_syl = wiki::last_syl(&word, &lang);
+    let _ = msg.react(&ctx_ser.http, '✅').await;
+
+    let bot_mode = room.bot_mode;
+    let used_vec: Vec<String> = room.used.iter().cloned().collect();
+    drop(room);
+
+    app.db.lb_add_word(guild_id, uid as i64).await;
+
+    if bot_mode {
+        let cands =
+            wiki::find_continuations(&app.db, guild_id, &lang, &next_syl, &used_vec, 5).await;
+        if let Some(bot_word) = cands.first() {
+            let mut room = room_arc.lock().await;
+            room.used.insert(bot_word.clone());
+            room.last_word = bot_word.clone();
+            room.round += 1;
+            let bot_next = wiki::last_syl(bot_word, &lang);
+            drop(room);
+            let _ = msg
+                .channel_id
+                .say(
+                    &ctx_ser.http,
+                    format!(
+                        "🤖 Bot nối: **{}** → Tiếp theo bắt đầu bằng **`{}`**",
+                        bot_word, bot_next
+                    ),
+                )
+                .await;
+        } else {
+            let mut room = room_arc.lock().await;
+            room.active = false;
+            let _ = msg
+                .channel_id
+                .say(
+                    &ctx_ser.http,
+                    format!(
+                        "🏆 Bạn đã thắng Bot! Không còn từ nào bắt đầu bằng **`{}`**.",
+                        next_syl
+                    ),
+                )
+                .await;
+        }
+    }
+
+    true
+}
