@@ -899,6 +899,84 @@ impl DbManager {
         }
     }
 
+    pub async fn update_public_room_players(&self, room_id: &str, current_players: i64) {
+        if let Ok(conn) = self.conn() {
+            let _ = conn
+                .execute(
+                    "UPDATE public_rooms SET current_players = ?1, updated_at = datetime('now','localtime') WHERE room_id = ?2",
+                    (current_players, room_id),
+                )
+                .await;
+        }
+    }
+
+    pub async fn close_public_room(&self, room_id: &str) {
+        if let Ok(conn) = self.conn() {
+            let _ = conn
+                .execute(
+                    "UPDATE public_rooms SET status = 'closed', updated_at = datetime('now','localtime') WHERE room_id = ?1",
+                    [room_id],
+                )
+                .await;
+        }
+    }
+
+    pub async fn save_telegram_token(
+        &self,
+        token: &str,
+        room_code: &str,
+        chat_id: i64,
+        host_id: i64,
+        host_name: &str,
+        lang: &str,
+    ) {
+        if let Ok(conn) = self.conn() {
+            let _ = conn
+                .execute(
+                    "INSERT OR REPLACE INTO telegram_room_tokens (token, room_code, chat_id, host_id, host_name, lang) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (token, room_code, chat_id, host_id, host_name, lang),
+                )
+                .await;
+        }
+    }
+
+    pub async fn get_telegram_token(&self, token: &str) -> Option<(String, i64, i64, String, String)> {
+        let conn = self.conn().ok()?;
+        let mut rows = conn
+            .query(
+                "SELECT room_code, chat_id, host_id, host_name, lang FROM telegram_room_tokens WHERE token = ?1 LIMIT 1",
+                [token],
+            )
+            .await
+            .ok()?;
+        if let Ok(Some(r)) = rows.next().await {
+            return Some((
+                r.get(0).unwrap_or_default(),
+                r.get(1).unwrap_or(0),
+                r.get(2).unwrap_or(0),
+                r.get(3).unwrap_or_default(),
+                r.get(4).unwrap_or_else(|_| "vi".to_string()),
+            ));
+        }
+        None
+    }
+
+    pub async fn game_user_score(&self, game: &str, user_id: i64) -> (i64, i64) {
+        let Ok(conn) = self.conn() else { return (0, 0) };
+        if let Ok(mut rows) = conn
+            .query(
+                "SELECT best_score, plays FROM game_scores WHERE game = ?1 AND user_id = ?2 LIMIT 1",
+                (game, user_id),
+            )
+            .await
+        {
+            if let Ok(Some(r)) = rows.next().await {
+                return (r.get(0).unwrap_or(0), r.get(1).unwrap_or(0));
+            }
+        }
+        (0, 0)
+    }
+
     pub async fn find_user_by_username_or_email(&self, identifier: &str) -> Option<WebUser> {
         let conn = self.conn().ok()?;
         let mut rows = conn
