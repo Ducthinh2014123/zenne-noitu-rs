@@ -1,14 +1,12 @@
+mod ws_game;
+
 use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        Path as AxumPath, Query, State,
-    },
+    extract::{ws::WebSocketUpgrade, Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -21,6 +19,7 @@ use zenne_core::AppContext;
 #[derive(Clone)]
 pub struct ApiState {
     pub ctx: AppContext,
+    pub ws_rooms: ws_game::WsRoomsMap,
 }
 
 fn check_admin_auth(headers: &HeaderMap, api_key: &str) -> bool {
@@ -40,7 +39,10 @@ fn check_admin_auth(headers: &HeaderMap, api_key: &str) -> bool {
 }
 
 pub fn build_router(ctx: AppContext) -> Router {
-    let state = Arc::new(ApiState { ctx });
+    let state = Arc::new(ApiState {
+        ctx,
+        ws_rooms: Arc::new(dashmap::DashMap::new()),
+    });
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -555,28 +557,21 @@ async fn ah_pub_game_session_start(
 }
 
 async fn ah_ws_game_room(
-    AxumPath(_room_id): AxumPath<String>,
+    AxumPath(room_id): AxumPath<String>,
     ws: WebSocketUpgrade,
     State(st): State<Arc<ApiState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_ws_socket(socket, st))
+    let ctx = st.ctx.clone();
+    let rooms = st.ws_rooms.clone();
+    ws.on_upgrade(move |socket| ws_game::handle_ws_connection(socket, room_id, ctx, rooms))
 }
 
 async fn ah_ws_game(ws: WebSocketUpgrade, State(st): State<Arc<ApiState>>) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_ws_socket(socket, st))
-}
-
-async fn handle_ws_socket(mut socket: WebSocket, _st: Arc<ApiState>) {
-    let _ = socket
-        .send(Message::Text(
-            json!({"type": "connected", "engine": "rust"}).to_string(),
-        ))
-        .await;
-    while let Some(Ok(msg)) = socket.next().await {
-        if let Message::Text(txt) = msg {
-            let _ = socket.send(Message::Text(txt)).await;
-        }
-    }
+    let ctx = st.ctx.clone();
+    let rooms = st.ws_rooms.clone();
+    ws.on_upgrade(move |socket| {
+        ws_game::handle_ws_connection(socket, "LOBBY".to_string(), ctx, rooms)
+    })
 }
 
 #[derive(Deserialize)]
