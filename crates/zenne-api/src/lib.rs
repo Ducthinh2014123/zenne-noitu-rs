@@ -1,3 +1,5 @@
+mod auth_routes;
+mod pub_games;
 mod ws_game;
 
 use axum::{
@@ -20,6 +22,9 @@ use zenne_core::AppContext;
 pub struct ApiState {
     pub ctx: AppContext,
     pub ws_rooms: ws_game::WsRoomsMap,
+    pub ttt_sessions: pub_games::TttSessionsMap,
+    pub ms_sessions: pub_games::MsSessionsMap,
+    pub used_nonces: pub_games::UsedNoncesMap,
 }
 
 fn check_admin_auth(headers: &HeaderMap, api_key: &str) -> bool {
@@ -42,6 +47,9 @@ pub fn build_router(ctx: AppContext) -> Router {
     let state = Arc::new(ApiState {
         ctx,
         ws_rooms: Arc::new(dashmap::DashMap::new()),
+        ttt_sessions: Arc::new(dashmap::DashMap::new()),
+        ms_sessions: Arc::new(dashmap::DashMap::new()),
+        used_nonces: Arc::new(dashmap::DashMap::new()),
     });
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -436,17 +444,50 @@ struct ScoreBody {
     game: String,
     user_id: i64,
     score: i64,
+    session_token: Option<String>,
 }
 
 async fn ah_pub_game_score(
     State(st): State<Arc<ApiState>>,
     Json(body): Json<ScoreBody>,
 ) -> impl IntoResponse {
+    if !pub_games::sanity_check_score(&body.game, body.score) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Điểm không hợp lệ"})),
+        )
+            .into_response();
+    }
+    if let Some(ref tok) = body.session_token {
+        if !tok.is_empty() {
+            if !zenne_core::auth::verify_game_session(
+                &st.ctx.config.game_session_secret,
+                tok,
+                body.user_id,
+                &body.game,
+            ) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "Session token không hợp lệ hoặc đã hết hạn"})),
+                )
+                    .into_response();
+            }
+            if st.used_nonces.contains_key(tok) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "Session token đã được sử dụng"})),
+                )
+                    .into_response();
+            }
+            st.used_nonces
+                .insert(tok.clone(), chrono::Utc::now().timestamp());
+        }
+    }
     st.ctx
         .db
         .game_submit_score(&body.game, body.user_id, body.score)
         .await;
-    Json(json!({ "ok": true }))
+    Json(json!({ "ok": true })).into_response()
 }
 
 async fn ah_pub_game_leaderboard(
@@ -469,51 +510,11 @@ async fn ah_pub_mp_rooms(State(st): State<Arc<ApiState>>) -> impl IntoResponse {
     Json(json!({ "ok": true, "rooms": rooms, "data": rooms }))
 }
 
-#[derive(Deserialize)]
-struct LoginBody {
-    username: String,
-    password: String,
-}
-
 async fn ah_auth_login(
     State(st): State<Arc<ApiState>>,
-    Json(body): Json<LoginBody>,
+    Json(body): Json<auth_routes::LoginBody>,
 ) -> impl IntoResponse {
-    let Some(user) = st
-        .ctx
-        .db
-        .find_user_by_username_or_email(&body.username)
-        .await
-    else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Sai tài khoản hoặc mật khẩu"})),
-        )
-            .into_response();
-    };
-    let ok = user
-        .password_hash
-        .as_deref()
-        .map(|h| zenne_core::auth::verify_password(&body.password, h))
-        .unwrap_or(false);
-    if !ok {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Sai tài khoản hoặc mật khẩu"})),
-        )
-            .into_response();
-    }
-    let token = zenne_core::auth::sign_web_token(
-        &st.ctx.config.web_token_secret,
-        user.id,
-        &user.username,
-        86400 * 7,
-    );
-    Json(json!({
-        "token": token,
-        "user": { "id": user.id, "username": user.username, "email": user.email, "is_admin": user.is_admin }
-    }))
-    .into_response()
+    auth_routes::handle_login(&st, body).await
 }
 
 #[derive(Deserialize)]
@@ -669,15 +670,36 @@ async fn ah_guilds(headers: HeaderMap, State(st): State<Arc<ApiState>>) -> impl 
         )
             .into_response();
     }
-    Json(json!({ "guilds": [] })).into_response()
+    let live = st.ctx.live.read().await;
+    Json(json!({ "guilds": live.guilds })).into_response()
 }
 
-async fn ah_pub_game_ttt(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
-    Json(json!({ "ok": true, "board": body.get("board").cloned().unwrap_or(json!([])) }))
+async fn ah_pub_game_ttt(
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    match pub_games::handle_ttt(&st.ctx, &st.ttt_sessions, &body).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err((code, msg)) => (
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(json!({ "error": msg })),
+        )
+            .into_response(),
+    }
 }
 
-async fn ah_pub_game_ms(Json(body): Json<serde_json::Value>) -> impl IntoResponse {
-    Json(json!({ "ok": true, "state": body }))
+async fn ah_pub_game_ms(
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    match pub_games::handle_ms(&st.ctx, &st.ms_sessions, &body).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err((code, msg)) => (
+            StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+            Json(json!({ "error": msg })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -749,63 +771,25 @@ fn extract_bearer_uid(headers: &HeaderMap, secret: &str) -> Option<(i64, String)
     Some((uid, uname))
 }
 
-#[derive(Deserialize)]
-struct RegisterBody {
-    username: String,
-    email: String,
-    password: String,
-}
-
 async fn ah_auth_register(
     State(st): State<Arc<ApiState>>,
-    Json(body): Json<RegisterBody>,
+    Json(body): Json<auth_routes::RegisterBody>,
 ) -> impl IntoResponse {
-    let Ok(hash) = zenne_core::auth::hash_password(&body.password) else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "Hash error"})),
-        )
-            .into_response();
-    };
-    let Ok(conn) = st.ctx.db.conn() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "DB error"})),
-        )
-            .into_response();
-    };
-    if let Err(e) = conn
-        .execute(
-            "INSERT INTO web_users (username, email, password_hash, email_verified) VALUES (?1, ?2, ?3, 1)",
-            (body.username.trim(), body.email.trim(), hash.as_str()),
-        )
-        .await
-    {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Tài khoản hoặc email đã tồn tại: {}", e)}))).into_response();
-    }
-    if let Some(u) = st
-        .ctx
-        .db
-        .find_user_by_username_or_email(body.username.trim())
-        .await
-    {
-        let token = zenne_core::auth::sign_web_token(
-            &st.ctx.config.web_token_secret,
-            u.id,
-            &u.username,
-            86400 * 7,
-        );
-        return Json(json!({ "ok": true, "token": token, "user": { "id": u.id, "username": u.username, "email": u.email } })).into_response();
-    }
-    Json(json!({ "ok": true })).into_response()
+    auth_routes::handle_register(&st, body).await
 }
 
-async fn ah_register_email_verify() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+async fn ah_register_email_verify(
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<auth_routes::EmailVerifyBody>,
+) -> impl IntoResponse {
+    auth_routes::handle_register_email_verify(&st, body).await
 }
 
-async fn ah_register_email_resend() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+async fn ah_register_email_resend(
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<auth_routes::EmailResendBody>,
+) -> impl IntoResponse {
+    auth_routes::handle_register_email_resend(&st, body).await
 }
 
 #[derive(Deserialize)]
@@ -936,15 +920,10 @@ async fn ah_pub_account_info(
     (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response()
 }
 
-#[derive(Deserialize)]
-struct ChangePwBody {
-    new_password: String,
-}
-
 async fn ah_pub_account_change_password(
     headers: HeaderMap,
     State(st): State<Arc<ApiState>>,
-    Json(body): Json<ChangePwBody>,
+    Json(body): Json<auth_routes::ChangePwBody>,
 ) -> impl IntoResponse {
     let Some((uid, _)) = extract_bearer_uid(&headers, &st.ctx.config.web_token_secret) else {
         return (
@@ -953,17 +932,7 @@ async fn ah_pub_account_change_password(
         )
             .into_response();
     };
-    if let Ok(hash) = zenne_core::auth::hash_password(&body.new_password) {
-        if let Ok(conn) = st.ctx.db.conn() {
-            let _ = conn
-                .execute(
-                    "UPDATE web_users SET password_hash = ?1 WHERE id = ?2",
-                    (hash.as_str(), uid),
-                )
-                .await;
-        }
-    }
-    Json(json!({ "ok": true })).into_response()
+    auth_routes::handle_change_password(&headers, &st, body, uid).await
 }
 
 async fn ah_pub_account_setup_2fa(
@@ -993,6 +962,7 @@ async fn ah_pub_account_setup_2fa(
 async fn ah_pub_account_enable_2fa(
     headers: HeaderMap,
     State(st): State<Arc<ApiState>>,
+    body: Option<Json<auth_routes::TotpCodeBody>>,
 ) -> impl IntoResponse {
     let Some((uid, _)) = extract_bearer_uid(&headers, &st.ctx.config.web_token_secret) else {
         return (
@@ -1001,17 +971,13 @@ async fn ah_pub_account_enable_2fa(
         )
             .into_response();
     };
-    if let Ok(conn) = st.ctx.db.conn() {
-        let _ = conn
-            .execute("UPDATE web_users SET totp_enabled = 1 WHERE id = ?1", [uid])
-            .await;
-    }
-    Json(json!({ "ok": true })).into_response()
+    auth_routes::handle_toggle_2fa(&st, uid, true, body.map(|b| b.0)).await
 }
 
 async fn ah_pub_account_disable_2fa(
     headers: HeaderMap,
     State(st): State<Arc<ApiState>>,
+    body: Option<Json<auth_routes::TotpCodeBody>>,
 ) -> impl IntoResponse {
     let Some((uid, _)) = extract_bearer_uid(&headers, &st.ctx.config.web_token_secret) else {
         return (
@@ -1020,29 +986,33 @@ async fn ah_pub_account_disable_2fa(
         )
             .into_response();
     };
-    if let Ok(conn) = st.ctx.db.conn() {
-        let _ = conn
-            .execute(
-                "UPDATE web_users SET totp_enabled = 0, totp_secret = NULL WHERE id = ?1",
-                [uid],
-            )
-            .await;
-    }
-    Json(json!({ "ok": true })).into_response()
+    auth_routes::handle_toggle_2fa(&st, uid, false, body.map(|b| b.0)).await
 }
 
-async fn ah_recovery_request() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+async fn ah_recovery_request(
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<auth_routes::RecoveryRequestBody>,
+) -> impl IntoResponse {
+    auth_routes::handle_recovery_request(&st, body).await
 }
-async fn ah_recovery_email_verify() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+async fn ah_recovery_email_verify(
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<auth_routes::RecoveryVerifyBody>,
+) -> impl IntoResponse {
+    auth_routes::handle_recovery_verify(&st, body).await
 }
-async fn ah_recovery_token_verify() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+async fn ah_recovery_token_verify(
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<auth_routes::RecoveryVerifyBody>,
+) -> impl IntoResponse {
+    auth_routes::handle_recovery_verify(&st, body).await
 }
 async fn ah_recovery_status() -> impl IntoResponse {
     Json(json!({ "status": "ok" }))
 }
-async fn ah_recovery_reset_password() -> impl IntoResponse {
-    Json(json!({ "ok": true }))
+async fn ah_recovery_reset_password(
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<auth_routes::RecoveryResetBody>,
+) -> impl IntoResponse {
+    auth_routes::handle_recovery_reset_password(&st, body).await
 }

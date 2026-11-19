@@ -3,6 +3,7 @@ pub mod anagram;
 pub mod battleship;
 pub mod baucua;
 pub mod cadao;
+pub mod catword;
 pub mod chinhta;
 pub mod connect4;
 pub mod emoji;
@@ -13,6 +14,8 @@ pub mod mastermind;
 pub mod memory;
 pub mod quiz;
 pub mod taixiu;
+pub mod tamsao;
+pub mod trieuphu;
 pub mod vuatiengviet;
 pub mod whoami;
 pub mod wordle;
@@ -21,6 +24,7 @@ use afk::AfkManager;
 use anagram::AnagramManager;
 use battleship::{BattleshipManager, SudokuManager};
 use cadao::CaDaoManager;
+use catword::CatWordManager;
 use chinhta::ChinhTaManager;
 use connect4::{Connect4Manager, TypingTestManager};
 use emoji::EmojiGameManager;
@@ -30,6 +34,8 @@ use history_guess::HistoryGuessManager;
 use mastermind::MastermindManager;
 use memory::{MemoryManager, UnoManager};
 use quiz::QuizManager;
+use tamsao::TamSaoManager;
+use trieuphu::TrieuPhuManager;
 use vuatiengviet::VuaTiengVietManager;
 use whoami::WhoAmIManager;
 use wordle::WordleManager;
@@ -40,6 +46,7 @@ pub struct GameHub {
     pub anagram: AnagramManager,
     pub battleship: BattleshipManager,
     pub cadao: CaDaoManager,
+    pub catword: CatWordManager,
     pub chinhta: ChinhTaManager,
     pub connect4: Connect4Manager,
     pub emoji: EmojiGameManager,
@@ -50,6 +57,8 @@ pub struct GameHub {
     pub memory: MemoryManager,
     pub quiz: QuizManager,
     pub sudoku: SudokuManager,
+    pub tamsao: TamSaoManager,
+    pub trieuphu: TrieuPhuManager,
     pub typing: TypingTestManager,
     pub uno: UnoManager,
     pub vuatiengviet: VuaTiengVietManager,

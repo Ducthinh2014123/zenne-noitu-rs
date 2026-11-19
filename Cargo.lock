@@ -6003,6 +6003,8 @@ dependencies = [
  "chrono",
  "dashmap 6.2.1",
  "futures-util",
+ "lettre",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "tokio",

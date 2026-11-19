@@ -1,3 +1,4 @@
+mod extra_cmds;
 mod music;
 mod noitu;
 mod workers;
@@ -568,35 +569,7 @@ pub async fn run_discord_bot(app: AppContext, games: GameHub) {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![
-                help(),
-                start(),
-                stop(),
-                setlang(),
-                setuilang(),
-                tratu(),
-                top(),
-                gopthemtu(),
-                ask(),
-                afk(),
-                taixiu(),
-                baucua(),
-                vtv(),
-                quiz(),
-                quizmath(),
-                wordle(),
-                anagram(),
-                battleship(),
-                memory(),
-                music::play(),
-                music::pause(),
-                music::resume(),
-                music::skip(),
-                music::mstop(),
-                music::queue(),
-                music::volume(),
-                music::rloop(),
-            ],
+            commands: all_commands(),
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some("!".into()),
                 ..Default::default()
@@ -640,45 +613,74 @@ pub async fn run_discord_bot(app: AppContext, games: GameHub) {
     }
 }
 
+fn all_commands() -> Vec<poise::Command<Data, Error>> {
+    vec![
+        help(),
+        start(),
+        stop(),
+        setlang(),
+        setuilang(),
+        tratu(),
+        top(),
+        gopthemtu(),
+        ask(),
+        afk(),
+        taixiu(),
+        baucua(),
+        vtv(),
+        quiz(),
+        quizmath(),
+        wordle(),
+        anagram(),
+        battleship(),
+        memory(),
+        music::play(),
+        music::pause(),
+        music::resume(),
+        music::skip(),
+        music::mstop(),
+        music::queue(),
+        music::volume(),
+        music::rloop(),
+        extra_cmds::setnoitu(),
+        extra_cmds::thamgia(),
+        extra_cmds::batdaulai(),
+        extra_cmds::diem(),
+        extra_cmds::contukhong(),
+        extra_cmds::ngonngu_hientai(),
+        extra_cmds::listlang(),
+        extra_cmds::cachestats(),
+        extra_cmds::danhsachtu(),
+        extra_cmds::taoroom(),
+        extra_cmds::multiplayer(),
+        extra_cmds::tochucgiaidau(),
+        extra_cmds::xemgiaidau(),
+        extra_cmds::ketthucgiaidau(),
+        extra_cmds::revoke_2fa(),
+        extra_cmds::nowplaying(),
+        extra_cmds::cadao(),
+        extra_cmds::chinhta(),
+        extra_cmds::emoji(),
+        extra_cmds::flag(),
+        extra_cmds::history(),
+        extra_cmds::whoami(),
+        extra_cmds::mastermind(),
+        extra_cmds::typing(),
+        extra_cmds::higherlower(),
+        extra_cmds::trieuphu(),
+        extra_cmds::catword(),
+        extra_cmds::tamsao(),
+        extra_cmds::sudoku(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn main_bot_commands() -> Vec<poise::Command<Data, Error>> {
-        vec![
-            help(),
-            start(),
-            stop(),
-            setlang(),
-            setuilang(),
-            tratu(),
-            top(),
-            gopthemtu(),
-            ask(),
-            afk(),
-            taixiu(),
-            baucua(),
-            vtv(),
-            quiz(),
-            quizmath(),
-            wordle(),
-            anagram(),
-            battleship(),
-            memory(),
-            music::play(),
-            music::pause(),
-            music::resume(),
-            music::skip(),
-            music::mstop(),
-            music::queue(),
-            music::volume(),
-            music::rloop(),
-        ]
-    }
-
     #[test]
     fn test_existing_command_registry_preserved() {
-        let cmds = main_bot_commands();
+        let cmds = all_commands();
         let names: Vec<String> = cmds.iter().map(|c| c.name.clone()).collect();
         for expected in [
             "help",
@@ -708,6 +710,19 @@ mod tests {
             "queue",
             "volume",
             "rloop",
+            "setnoitu",
+            "thamgia",
+            "batdaulai",
+            "diem",
+            "contukhong",
+            "taoroom",
+            "multiplayer",
+            "tochucgiaidau",
+            "nowplaying",
+            "cadao",
+            "chinhta",
+            "flag",
+            "trieuphu",
         ] {
             assert!(
                 names.contains(&expected.to_string()),
@@ -715,6 +730,6 @@ mod tests {
                 expected
             );
         }
-        assert_eq!(cmds.len(), 27);
+        assert!(cmds.len() >= 27);
     }
 }

@@ -72,10 +72,7 @@ pub async fn handle_word_message(
         return false;
     }
 
-    if !room.players.is_empty()
-        && room.players[room.turn_idx % room.players.len()] != uid
-        && !room.bot_mode
-    {
+    if room.bot_mode && !room.players.is_empty() && room.players[0] != uid {
         return false;
     }
 

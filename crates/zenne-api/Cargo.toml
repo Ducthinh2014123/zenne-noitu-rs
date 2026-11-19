@@ -17,3 +17,5 @@ tracing.workspace = true
 anyhow.workspace = true
 futures-util.workspace = true
 uuid.workspace = true
+rand.workspace = true
+lettre.workspace = true
