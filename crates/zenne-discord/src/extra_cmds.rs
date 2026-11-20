@@ -419,7 +419,6 @@ pub async fn resetpassword_admin(ctx: Context<'_>, email: String) -> Result<(), 
         .await?;
         return Ok(());
     }
-    let _ = ctx.defer_ephemeral().await;
     let (email_norm, admin_token) =
         match issue_admin_recovery_token(&ctx.data().app.db, &email).await {
             Ok((_uid, em, tok)) => (em, tok),
@@ -463,7 +462,6 @@ pub async fn revoke_2fa(ctx: Context<'_>, identifier: String) -> Result<(), Erro
         .await?;
         return Ok(());
     }
-    let _ = ctx.defer_ephemeral().await;
     let target = identifier.trim().to_lowercase();
     if target.is_empty() {
         ctx.send(
