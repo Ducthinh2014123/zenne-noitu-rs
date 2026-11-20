@@ -6,9 +6,7 @@ use crate::state::{
 use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use teloxide::payloads::{
-    AnswerCallbackQuerySetters, EditMessageTextSetters, SendMessageSetters,
-};
+use teloxide::payloads::{AnswerCallbackQuerySetters, EditMessageTextSetters, SendMessageSetters};
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, ParseMode};
 use tokio::sync::Mutex;
@@ -110,6 +108,15 @@ pub async fn cmd_start(bot: &Bot, msg: &Message, st: &TelegramState, args: &str)
         if let Some(room_chat_id) = target_chat_id {
             if let Some(room_arc) = st.noitu_rooms.get(&room_chat_id).map(|r| r.value().clone()) {
                 let mut g = room_arc.lock().await;
+                if !g.join_token.is_empty() && g.join_token != token {
+                    let _ = bot
+                        .send_message(
+                            chat_id,
+                            "❌ Mã tham gia phòng không hợp lệ hoặc đã hết hạn.",
+                        )
+                        .await;
+                    return;
+                }
                 if g.joining {
                     if g.max_players > 0 && (g.players.len() as i64) >= g.max_players {
                         let _ = bot
@@ -480,13 +487,16 @@ pub async fn cmd_stop(bot: &Bot, msg: &Message, st: &TelegramState) {
         g.cancel_timeout();
         g.active = false;
         g.joining = false;
+        if !g.join_token.is_empty() {
+            st.room_tokens.remove(&g.join_token);
+        }
         let rc = g.room_code.clone();
 
         let s_str = if g.scores.is_empty() {
             "<i>Chưa ai ghi được điểm nào.</i>".to_string()
         } else {
             let mut sorted: Vec<(i64, i64)> = g.scores.iter().map(|(k, v)| (*k, *v)).collect();
-            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
             let medals = ["🥇", "🥈", "🥉"];
             sorted
                 .iter()
@@ -503,7 +513,12 @@ pub async fn cmd_stop(bot: &Bot, msg: &Message, st: &TelegramState) {
                     } else {
                         format!("{}.", i + 1)
                     };
-                    format!("{} {}: <b>{}</b> điểm", medal, user_mention(*uid, &p_name), pts)
+                    format!(
+                        "{} {}: <b>{}</b> điểm",
+                        medal,
+                        user_mention(*uid, &p_name),
+                        pts
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -547,7 +562,7 @@ pub async fn cmd_diem(bot: &Bot, msg: &Message, st: &TelegramState) {
     }
 
     let mut sorted: Vec<(i64, i64)> = g.scores.iter().map(|(k, v)| (*k, *v)).collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
     let lines = sorted
         .iter()
         .enumerate()
@@ -571,10 +586,7 @@ pub async fn cmd_diem(bot: &Bot, msg: &Message, st: &TelegramState) {
         .join("\n");
 
     let _ = bot
-        .send_message(
-            chat_id,
-            format!("📊 <b>BẢNG ĐIỂM HIỆN TẠI:</b>\n{}", lines),
-        )
+        .send_message(chat_id, format!("📊 <b>BẢNG ĐIỂM HIỆN TẠI:</b>\n{}", lines))
         .parse_mode(ParseMode::Html)
         .await;
 }
@@ -689,8 +701,12 @@ async fn schedule_turn_timeout(
             if g.players.len() == 1 {
                 let winner = g.players[0].clone();
                 let rc = g.room_code.clone();
+                let jt = g.join_token.clone();
                 g.active = false;
                 drop(g);
+                if !jt.is_empty() {
+                    st_c.room_tokens.remove(&jt);
+                }
                 st_c.app.db.game_submit_score("noitu", winner.id, 5).await;
                 st_c.app.db.close_public_room(&rc).await;
                 st_c.noitu_rooms.remove(&chat_id.0);
@@ -787,6 +803,7 @@ pub async fn cmd_taophong(bot: &Bot, msg: &Message, st: &TelegramState, args: &s
     execute_create_public_room(bot, chat_id, uid, uname, st, name, lang, max_p).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_create_public_room(
     bot: &Bot,
     chat_id: ChatId,
@@ -918,14 +935,24 @@ pub async fn cmd_tratu(bot: &Bot, msg: &Message, st: &TelegramState, args: &str)
     let in_cache = st.app.db.cache_exists(&lang, query).await;
     let mut in_wiki = false;
     if !in_bank && !in_cache {
-        let (ok, _) =
-            wiki::check_word(&st.app.http, &st.app.db, &st.app.cache, chat_id.0, &lang, query)
-                .await;
+        let (ok, _) = wiki::check_word(
+            &st.app.http,
+            &st.app.db,
+            &st.app.cache,
+            chat_id.0,
+            &lang,
+            query,
+        )
+        .await;
         in_wiki = ok;
     }
 
     let is_valid = in_bank || in_cache || in_wiki;
-    let status_icon = if is_valid { "✅ HỢP LỆ" } else { "❌ KHÔNG TÌM THẤY" };
+    let status_icon = if is_valid {
+        "✅ HỢP LỆ"
+    } else {
+        "❌ KHÔNG TÌM THẤY"
+    };
     let source = if in_bank {
         "Ngân hàng server"
     } else if in_cache {
@@ -1079,7 +1106,12 @@ pub async fn cmd_top(bot: &Bot, chat_id: ChatId, st: &TelegramState) {
 
 pub async fn cmd_setlang(bot: &Bot, msg: &Message, st: &TelegramState, args: &str) {
     let chat_id = msg.chat.id;
-    let new_lang = args.split_whitespace().next().unwrap_or("").trim().to_lowercase();
+    let new_lang = args
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
     if new_lang.is_empty() {
         let curr = st.app.db.get_lang(chat_id.0).await;
         let _ = bot
@@ -1123,7 +1155,10 @@ pub async fn cmd_ask(bot: &Bot, msg: &Message, st: &TelegramState, args: &str) {
     }
 
     let thinking = bot
-        .send_message(chat_id, "🤔 <i>Trợ lý AI Kira đang suy nghĩ câu trả lời...</i>")
+        .send_message(
+            chat_id,
+            "🤔 <i>Trợ lý AI Kira đang suy nghĩ câu trả lời...</i>",
+        )
         .parse_mode(ParseMode::Html)
         .await;
 
@@ -1158,7 +1193,11 @@ pub async fn cmd_ask(bot: &Bot, msg: &Message, st: &TelegramState, args: &str) {
     }
 }
 
-pub async fn handle_callback_query(bot: Bot, q: CallbackQuery, st: TelegramState) -> ResponseResult<()> {
+pub async fn handle_callback_query(
+    bot: Bot,
+    q: CallbackQuery,
+    st: TelegramState,
+) -> ResponseResult<()> {
     let Some(ref data) = q.data else {
         let _ = bot.answer_callback_query(q.id.clone()).await;
         return Ok(());
@@ -1323,7 +1362,10 @@ pub async fn handle_callback_query(bot: Bot, q: CallbackQuery, st: TelegramState
         if rooms.is_empty() {
             let no_rooms_text = "⚠️ <b>Hiện chưa có phòng công khai nào đang mở!</b>\n👉 Hãy bấm <b>➕ Tạo phòng công khai</b> để mở phòng đầu tiên nhé!";
             let kb = InlineKeyboardMarkup::new(vec![
-                vec![InlineKeyboardButton::callback("➕ Tạo Phòng Mới", "mp_create")],
+                vec![InlineKeyboardButton::callback(
+                    "➕ Tạo Phòng Mới",
+                    "mp_create",
+                )],
                 vec![InlineKeyboardButton::callback("🔙 Về Lại Menu", "mp_menu")],
             ]);
             if bot
@@ -1385,7 +1427,10 @@ pub async fn handle_callback_query(bot: Bot, q: CallbackQuery, st: TelegramState
             InlineKeyboardButton::callback("🔄 Làm Mới Danh Sách", "mp_list"),
             InlineKeyboardButton::callback("➕ Tạo Phòng Mới", "mp_create"),
         ]);
-        kb_rows.push(vec![InlineKeyboardButton::callback("🔙 Về Lại Menu", "mp_menu")]);
+        kb_rows.push(vec![InlineKeyboardButton::callback(
+            "🔙 Về Lại Menu",
+            "mp_menu",
+        )]);
 
         let rooms_text = format!(
             "🌐 <b>DANH SÁCH PHÒNG CÔNG KHAI ĐANG MỞ ({} phòng)</b>\n\n{}\n\n👉 <i>Nhấn vào nút phòng bên dưới để tham gia trực tiếp đấu cùng người chơi!</i>",
@@ -1488,7 +1533,11 @@ pub async fn handle_text_message(bot: &Bot, msg: &Message, st: &TelegramState, r
             }
 
             // B. Used word check
-            let used = room_arc.lock().await.used_words.contains(&word.to_lowercase());
+            let used = room_arc
+                .lock()
+                .await
+                .used_words
+                .contains(&word.to_lowercase());
             if used {
                 let _ = bot
                     .send_message(
@@ -1610,12 +1659,7 @@ pub async fn handle_text_message(bot: &Bot, msg: &Message, st: &TelegramState, r
                     g.used_words.iter().cloned().collect()
                 };
                 let bot_sugs = wiki::find_continuations(
-                    &st.app.db,
-                    chat_id.0,
-                    &lang,
-                    &new_syl,
-                    &used_list,
-                    10,
+                    &st.app.db, chat_id.0, &lang, &new_syl, &used_list, 10,
                 )
                 .await;
                 let picked = {
@@ -1652,6 +1696,14 @@ pub async fn handle_text_message(bot: &Bot, msg: &Message, st: &TelegramState, r
                         .await;
                     schedule_turn_timeout(bot, st, room_arc).await;
                 } else {
+                    let jt = {
+                        let mut g = room_arc.lock().await;
+                        g.cancel_timeout();
+                        g.join_token.clone()
+                    };
+                    if !jt.is_empty() {
+                        st.room_tokens.remove(&jt);
+                    }
                     st.app.db.game_submit_score("noitu", uid, 10).await;
                     st.noitu_rooms.remove(&chat_id.0);
                     let _ = bot
@@ -1756,9 +1808,14 @@ pub async fn handle_text_message(bot: &Bot, msg: &Message, st: &TelegramState, r
                     }
                 }
             }
-            let tile_str: String = tiles.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+            let tile_str: String = tiles
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
             wd.attempts += 1;
-            wd.history.push(format!("{}  <b>{}</b>", tile_str, html_escape(&guess)));
+            wd.history
+                .push(format!("{}  <b>{}</b>", tile_str, html_escape(&guess)));
             let history_text = wd.history.join("\n");
             let attempts = wd.attempts;
             let max_attempts = wd.max_attempts;
@@ -1821,10 +1878,7 @@ pub async fn handle_text_message(bot: &Bot, msg: &Message, st: &TelegramState, r
         let lower = raw_text.trim().to_lowercase();
         if matches!(lower.as_str(), "huy" | "hủy" | "cancel" | "stop" | "exit") {
             let _ = bot
-                .send_message(
-                    chat_id,
-                    "⏹️ <b>Đã hủy tiến trình tạo phòng công khai.</b>",
-                )
+                .send_message(chat_id, "⏹️ <b>Đã hủy tiến trình tạo phòng công khai.</b>")
                 .parse_mode(ParseMode::Html)
                 .await;
             return;

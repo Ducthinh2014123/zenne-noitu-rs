@@ -42,16 +42,16 @@ impl BattleshipManager {
     pub fn render(g: &BattleshipGame) -> String {
         let mut out = String::from("  1 2 3 4 5\n");
         let rows = ['A', 'B', 'C', 'D', 'E'];
-        for r in 0..5 {
-            out.push(rows[r]);
+        for (r, &row_ch) in rows.iter().enumerate() {
+            out.push(row_ch);
             out.push(' ');
             for c in 0..5 {
                 if g.hits.contains(&(r, c)) {
-                    out.push_str("💥");
+                    out.push('💥');
                 } else if g.misses.contains(&(r, c)) {
-                    out.push_str("💦");
+                    out.push('💦');
                 } else {
-                    out.push_str("🟦");
+                    out.push('🟦');
                 }
             }
             out.push('\n');

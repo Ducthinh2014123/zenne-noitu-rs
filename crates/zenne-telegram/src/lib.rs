@@ -84,12 +84,12 @@ async fn handle_message(bot: Bot, msg: Message, st: TelegramState) -> ResponseRe
             "gopthemtu" | "addword" | "gtt" => noitu::cmd_gopthemtu(&bot, &msg, &st, args).await,
             "setlang" | "lang" => noitu::cmd_setlang(&bot, &msg, &st, args).await,
             "quiz" | "quizz" | "toan" | "khoahoc" => {
-                let effective_args = if matches!(cmd.as_str(), "toan" | "khoahoc") && args.is_empty()
-                {
-                    cmd.as_str()
-                } else {
-                    args
-                };
+                let effective_args =
+                    if matches!(cmd.as_str(), "toan" | "khoahoc") && args.is_empty() {
+                        cmd.as_str()
+                    } else {
+                        args
+                    };
                 minigames::cmd_quiz(&bot, &msg, &st, effective_args).await;
             }
             "vtv" | "vuatiengviet" => minigames::cmd_vtv(&bot, &msg, &st).await,

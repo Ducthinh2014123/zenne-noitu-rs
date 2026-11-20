@@ -217,8 +217,35 @@ impl DbManager {
             lang            TEXT DEFAULT 'vi',
             created_at      TEXT DEFAULT (datetime('now','localtime'))
         );
+        CREATE INDEX IF NOT EXISTS idx_wb_guild ON word_bank(guild_id);
+        CREATE INDEX IF NOT EXISTS idx_pw_guild ON pending_words(guild_id);
+        CREATE INDEX IF NOT EXISTS idx_pw_status ON pending_words(status);
+        CREATE INDEX IF NOT EXISTS idx_wc_lang ON wiki_cache(lang);
+        CREATE INDEX IF NOT EXISTS idx_lb_guild ON leaderboard(guild_id);
+        CREATE INDEX IF NOT EXISTS idx_gs_game ON game_scores(game);
+        CREATE INDEX IF NOT EXISTS idx_wu_email ON web_users(email);
+        CREATE INDEX IF NOT EXISTS idx_wu_prov ON web_users(provider, provider_id);
+        CREATE INDEX IF NOT EXISTS idx_tn_guild ON tournaments(guild_id);
+        CREATE INDEX IF NOT EXISTS idx_pr_user ON password_recovery(user_id);
+        CREATE INDEX IF NOT EXISTS idx_pr_hash ON password_recovery(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_pr_type ON password_recovery(type);
         "#;
         conn.execute_batch(schema).await?;
+        let migrations = [
+            "ALTER TABLE guild_settings ADD COLUMN ui_lang TEXT DEFAULT 'vi'",
+            "ALTER TABLE tournaments ADD COLUMN message_id INTEGER DEFAULT NULL",
+            "ALTER TABLE web_users ADD COLUMN totp_secret TEXT DEFAULT NULL",
+            "ALTER TABLE web_users ADD COLUMN totp_enabled INTEGER DEFAULT 0",
+            "ALTER TABLE web_users ADD COLUMN backup_codes TEXT DEFAULT NULL",
+            "ALTER TABLE web_users ADD COLUMN email_verified INTEGER DEFAULT 0",
+            "ALTER TABLE web_users ADD COLUMN ui_lang TEXT DEFAULT NULL",
+            "ALTER TABLE password_recovery ADD COLUMN source TEXT DEFAULT NULL",
+            "ALTER TABLE password_recovery ADD COLUMN attempts INTEGER DEFAULT 0",
+            "ALTER TABLE web_users ADD COLUMN password_changed_at INTEGER DEFAULT 0",
+        ];
+        for sql in migrations {
+            let _ = conn.execute(sql, ()).await;
+        }
         info!("[DB] Khoi tao bang du lieu hoan tat.");
         Ok(())
     }
@@ -317,7 +344,7 @@ impl DbManager {
         let Ok(conn) = self.conn() else { return false };
         if let Ok(mut rows) = conn
             .query(
-                "SELECT 1 FROM word_bank WHERE guild_id = ?1 AND word = ?2 LIMIT 1",
+                "SELECT 1 FROM word_bank WHERE guild_id = ?1 AND word = ?2 COLLATE NOCASE LIMIT 1",
                 (guild_id, word),
             )
             .await
@@ -356,13 +383,20 @@ impl DbManager {
         }
         let res = conn
             .execute(
-                "INSERT INTO pending_words (guild_id, word, submitted_by) VALUES (?1, ?2, ?3)",
+                "INSERT INTO pending_words (guild_id, word, submitted_by) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(guild_id, word) DO UPDATE SET
+                    status = 'pending',
+                    submitted_by = excluded.submitted_by,
+                    submitted_at = datetime('now','localtime'),
+                    reviewed_by = NULL,
+                    reviewed_at = NULL
+                 WHERE pending_words.status = 'rejected'",
                 (guild_id, word, submitted_by),
             )
             .await
             .map_err(|_| "Từ này đã được gửi chờ duyệt trước đó!".to_string())?;
         if res == 0 {
-            return Err("Không thể gửi từ chờ duyệt.".to_string());
+            return Err("Từ này đã được gửi chờ duyệt trước đó!".to_string());
         }
         let mut rows = conn
             .query(
@@ -428,12 +462,16 @@ impl DbManager {
         let word: String = row.get(1).ok()?;
         let sub_by: i64 = row.get(2).ok()?;
         let new_status = if approve { "approved" } else { "rejected" };
-        let _ = conn
+        let affected = conn
             .execute(
-                "UPDATE pending_words SET status = ?1, reviewed_by = ?2, reviewed_at = datetime('now','localtime') WHERE id = ?3",
+                "UPDATE pending_words SET status = ?1, reviewed_by = ?2, reviewed_at = datetime('now','localtime') WHERE id = ?3 AND status = 'pending'",
                 (new_status, reviewer_id, pending_id),
             )
-            .await;
+            .await
+            .unwrap_or(0);
+        if affected == 0 {
+            return None;
+        }
         if approve {
             self.add_approved_word(gid, &word, sub_by, reviewer_id)
                 .await;
@@ -467,7 +505,8 @@ impl DbManager {
         if let Ok(conn) = self.conn() {
             let _ = conn
                 .execute(
-                    "INSERT OR IGNORE INTO wiki_cache (lang, word) VALUES (?1, ?2)",
+                    "INSERT INTO wiki_cache (lang, word) VALUES (?1, ?2)
+                     ON CONFLICT(lang, word) DO UPDATE SET hit_count = hit_count + 1",
                     (lang, word),
                 )
                 .await;
@@ -569,7 +608,49 @@ impl DbManager {
         let mut out = Vec::new();
         if let Ok(mut rows) = conn
             .query(
-                "SELECT user_id, total_words, current_streak, max_streak, games_played, games_won FROM leaderboard WHERE guild_id = ?1 ORDER BY total_words DESC LIMIT ?2",
+                "SELECT user_id, total_words, current_streak, max_streak, games_played, games_won FROM leaderboard WHERE guild_id = ?1 ORDER BY total_words DESC, max_streak DESC, games_won DESC, user_id ASC LIMIT ?2",
+                (guild_id, limit),
+            )
+            .await
+        {
+            while let Ok(Some(r)) = rows.next().await {
+                out.push(LeaderboardRow {
+                    user_id: r.get(0).unwrap_or(0),
+                    total_words: r.get(1).unwrap_or(0),
+                    current_streak: r.get(2).unwrap_or(0),
+                    max_streak: r.get(3).unwrap_or(0),
+                    games_played: r.get(4).unwrap_or(0),
+                    games_won: r.get(5).unwrap_or(0),
+                });
+            }
+        }
+        out
+    }
+
+    pub async fn lb_add_game(&self, guild_id: i64, players: &[i64], winner_id: Option<i64>) {
+        if let Ok(conn) = self.conn() {
+            for &uid in players {
+                let won: i64 = if winner_id == Some(uid) { 1 } else { 0 };
+                let _ = conn
+                    .execute(
+                        "INSERT INTO leaderboard (guild_id, user_id, games_played, games_won)
+                         VALUES (?1, ?2, 1, ?3)
+                         ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                            games_played = games_played + 1,
+                            games_won = games_won + excluded.games_won",
+                        (guild_id, uid, won),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    pub async fn lb_streak_top(&self, guild_id: i64, limit: i64) -> Vec<LeaderboardRow> {
+        let Ok(conn) = self.conn() else { return vec![] };
+        let mut out = Vec::new();
+        if let Ok(mut rows) = conn
+            .query(
+                "SELECT user_id, total_words, current_streak, max_streak, games_played, games_won FROM leaderboard WHERE guild_id = ?1 AND max_streak > 0 ORDER BY max_streak DESC, total_words DESC, user_id ASC LIMIT ?2",
                 (guild_id, limit),
             )
             .await
@@ -589,18 +670,38 @@ impl DbManager {
     }
 
     pub async fn game_submit_score(&self, game: &str, user_id: i64, score: i64) {
+        let cumulative = matches!(
+            game,
+            "afk" | "taixiu" | "baucua" | "trivia" | "math" | "trieuphu" | "wordle" | "scramble"
+        );
+        self.game_submit_score_mode(game, user_id, score, cumulative)
+            .await;
+    }
+
+    pub async fn game_submit_score_mode(
+        &self,
+        game: &str,
+        user_id: i64,
+        score: i64,
+        cumulative: bool,
+    ) {
         if let Ok(conn) = self.conn() {
-            let _ = conn
-                .execute(
-                    "INSERT INTO game_scores (game, user_id, best_score, plays, updated_at)
-                     VALUES (?1, ?2, ?3, 1, datetime('now','localtime'))
-                     ON CONFLICT(game, user_id) DO UPDATE SET
-                        best_score = MAX(best_score, excluded.best_score),
-                        plays = plays + 1,
-                        updated_at = datetime('now','localtime')",
-                    (game, user_id, score),
-                )
-                .await;
+            let sql = if cumulative {
+                "INSERT INTO game_scores (game, user_id, best_score, plays, updated_at)
+                 VALUES (?1, ?2, ?3, 1, datetime('now','localtime'))
+                 ON CONFLICT(game, user_id) DO UPDATE SET
+                    best_score = best_score + excluded.best_score,
+                    plays = plays + 1,
+                    updated_at = datetime('now','localtime')"
+            } else {
+                "INSERT INTO game_scores (game, user_id, best_score, plays, updated_at)
+                 VALUES (?1, ?2, ?3, 1, datetime('now','localtime'))
+                 ON CONFLICT(game, user_id) DO UPDATE SET
+                    best_score = MAX(best_score, excluded.best_score),
+                    plays = plays + 1,
+                    updated_at = datetime('now','localtime')"
+            };
+            let _ = conn.execute(sql, (game, user_id, score)).await;
         }
     }
 
@@ -609,7 +710,7 @@ impl DbManager {
         let mut out = Vec::new();
         if let Ok(mut rows) = conn
             .query(
-                "SELECT user_id, best_score, plays FROM game_scores WHERE game = ?1 ORDER BY best_score DESC LIMIT ?2",
+                "SELECT user_id, best_score, plays FROM game_scores WHERE game = ?1 ORDER BY best_score DESC, updated_at ASC, user_id ASC LIMIT ?2",
                 (game, limit),
             )
             .await
@@ -802,7 +903,7 @@ impl DbManager {
         let mut out = Vec::new();
         if let Ok(mut rows) = conn
             .query(
-                "SELECT user_id, best_score, plays FROM game_scores WHERE game = ?1 ORDER BY best_score DESC LIMIT ?2",
+                "SELECT user_id, best_score, plays FROM game_scores WHERE game = ?1 ORDER BY best_score DESC, updated_at ASC, user_id ASC LIMIT ?2",
                 (game, limit),
             )
             .await
@@ -846,6 +947,13 @@ impl DbManager {
 
     pub async fn get_public_rooms(&self) -> Vec<PublicRoomRow> {
         let Ok(conn) = self.conn() else { return vec![] };
+        let _ = conn
+            .execute(
+                "UPDATE public_rooms SET status = 'closed', updated_at = datetime('now','localtime')
+                 WHERE status != 'closed' AND datetime(created_at, '+3 hours') < datetime('now','localtime')",
+                (),
+            )
+            .await;
         let mut out = Vec::new();
         if let Ok(mut rows) = conn
             .query(
@@ -874,12 +982,47 @@ impl DbManager {
         out
     }
 
+    pub async fn get_public_room(&self, room_id: &str) -> Option<PublicRoomRow> {
+        let conn = self.conn().ok()?;
+        let mut rows = conn
+            .query(
+                "SELECT room_id, name, platform, host_id, host_name, lang, max_players, current_players, join_token, web_url, tele_url, status FROM public_rooms WHERE UPPER(room_id) = UPPER(?1) LIMIT 1",
+                [room_id],
+            )
+            .await
+            .ok()?;
+        let r = rows.next().await.ok()??;
+        Some(PublicRoomRow {
+            room_id: r.get(0).unwrap_or_default(),
+            name: r.get(1).unwrap_or_default(),
+            platform: r.get(2).unwrap_or_default(),
+            host_id: r.get(3).unwrap_or_default(),
+            host_name: r.get(4).unwrap_or_default(),
+            lang: r.get(5).unwrap_or_else(|_| "vi".to_string()),
+            max_players: r.get(6).unwrap_or(0),
+            current_players: r.get(7).unwrap_or(1),
+            join_token: r.get(8).ok(),
+            web_url: r.get(9).ok(),
+            tele_url: r.get(10).ok(),
+            status: r.get(11).unwrap_or_else(|_| "waiting".to_string()),
+        })
+    }
+
     pub async fn create_public_room(&self, room: &PublicRoomRow) {
         if let Ok(conn) = self.conn() {
             let _ = conn
                 .execute(
-                    "INSERT OR REPLACE INTO public_rooms (room_id, name, platform, host_id, host_name, lang, max_players, current_players, join_token, web_url, tele_url, status)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    "INSERT INTO public_rooms (room_id, name, platform, host_id, host_name, lang, max_players, current_players, join_token, web_url, tele_url, status)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                     ON CONFLICT(room_id) DO UPDATE SET
+                        name = excluded.name,
+                        lang = excluded.lang,
+                        max_players = excluded.max_players,
+                        current_players = excluded.current_players,
+                        web_url = excluded.web_url,
+                        tele_url = excluded.tele_url,
+                        status = excluded.status,
+                        updated_at = datetime('now','localtime')",
                     (
                         room.room_id.as_str(),
                         room.name.as_str(),
@@ -940,7 +1083,10 @@ impl DbManager {
         }
     }
 
-    pub async fn get_telegram_token(&self, token: &str) -> Option<(String, i64, i64, String, String)> {
+    pub async fn get_telegram_token(
+        &self,
+        token: &str,
+    ) -> Option<(String, i64, i64, String, String)> {
         let conn = self.conn().ok()?;
         let mut rows = conn
             .query(
@@ -999,5 +1145,55 @@ impl DbManager {
             email_verified: r.get(8).unwrap_or(0),
             ui_lang: r.get(9).ok(),
         })
+    }
+
+    pub async fn tournament_join(&self, tournament_id: i64, user_id: i64) -> bool {
+        let Ok(conn) = self.conn() else { return false };
+        conn.execute(
+            "INSERT OR IGNORE INTO tournament_players (tournament_id, user_id) VALUES (?1, ?2)",
+            (tournament_id, user_id),
+        )
+        .await
+        .map(|n| n > 0)
+        .unwrap_or(false)
+    }
+
+    pub async fn tournament_add_word(&self, guild_id: i64, user_id: i64) {
+        let Ok(conn) = self.conn() else { return };
+        if let Ok(mut rows) = conn
+            .query(
+                "SELECT id FROM tournaments WHERE guild_id = ?1 AND status = 'active' ORDER BY id DESC LIMIT 1",
+                [guild_id],
+            )
+            .await
+        {
+            if let Ok(Some(r)) = rows.next().await {
+                let tid: i64 = r.get(0).unwrap_or(0);
+                let _ = conn
+                    .execute(
+                        "INSERT INTO tournament_players (tournament_id, user_id, words_scored) VALUES (?1, ?2, 1)
+                         ON CONFLICT(tournament_id, user_id) DO UPDATE SET words_scored = words_scored + 1",
+                        (tid, user_id),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    pub async fn tournament_players(&self, tournament_id: i64) -> Vec<(i64, i64)> {
+        let Ok(conn) = self.conn() else { return vec![] };
+        let mut out = Vec::new();
+        if let Ok(mut rows) = conn
+            .query(
+                "SELECT user_id, words_scored FROM tournament_players WHERE tournament_id = ?1 ORDER BY words_scored DESC, joined_at ASC, user_id ASC",
+                [tournament_id],
+            )
+            .await
+        {
+            while let Ok(Some(r)) = rows.next().await {
+                out.push((r.get(0).unwrap_or(0), r.get(1).unwrap_or(0)));
+            }
+        }
+        out
     }
 }

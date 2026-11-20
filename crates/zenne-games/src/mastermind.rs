@@ -64,10 +64,10 @@ impl MastermindManager {
             if used_g[i] {
                 continue;
             }
-            for j in 0..4 {
-                if !used_s[j] && digits[i] == game.secret[j] {
+            for (j, used) in used_s.iter_mut().enumerate() {
+                if !*used && digits[i] == game.secret[j] {
                     partial += 1;
-                    used_s[j] = true;
+                    *used = true;
                     break;
                 }
             }

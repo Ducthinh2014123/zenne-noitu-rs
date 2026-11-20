@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use zenne_core::{i18n, wiki, AppContext};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WordChainRoom {
     pub active: bool,
     pub players: Vec<u64>,
@@ -15,19 +15,13 @@ pub struct WordChainRoom {
     pub scores: HashMap<u64, u32>,
     pub round: u32,
     pub bot_mode: bool,
+    pub timeout_handle: Option<tokio::task::AbortHandle>,
 }
 
-impl Default for WordChainRoom {
-    fn default() -> Self {
-        Self {
-            active: false,
-            players: Vec::new(),
-            turn_idx: 0,
-            last_word: String::new(),
-            used: HashSet::new(),
-            scores: HashMap::new(),
-            round: 0,
-            bot_mode: false,
+impl WordChainRoom {
+    pub fn cancel_timeout(&mut self) {
+        if let Some(h) = self.timeout_handle.take() {
+            h.abort();
         }
     }
 }
@@ -75,9 +69,17 @@ pub async fn handle_word_message(
     if room.bot_mode && !room.players.is_empty() && room.players[0] != uid {
         return false;
     }
+    if !room.bot_mode && room.players.len() > 1 {
+        let curr_turn = room.players.get(room.turn_idx).copied();
+        if curr_turn != Some(uid) {
+            return false;
+        }
+    }
 
     if !room.last_word.is_empty() && !wiki::valid_chain(&room.last_word, &word, &lang) {
         let req_syl = wiki::last_syl(&room.last_word, &lang);
+        drop(room);
+        app.db.lb_reset_streak(guild_id, uid as i64).await;
         let reply = i18n::t(
             &ui_lang,
             "wrong_chain",
@@ -108,6 +110,8 @@ pub async fn handle_word_message(
     }
 
     if !valid {
+        drop(room);
+        app.db.lb_reset_streak(guild_id, uid as i64).await;
         let langname = i18n::lang_display_name(&lang);
         let reply = i18n::t(
             &ui_lang,
@@ -118,6 +122,7 @@ pub async fn handle_word_message(
         return true;
     }
 
+    room.cancel_timeout();
     room.used.insert(word.clone());
     room.last_word = word.clone();
     room.round += 1;
@@ -134,9 +139,45 @@ pub async fn handle_word_message(
 
     let bot_mode = room.bot_mode;
     let used_vec: Vec<String> = room.used.iter().cloned().collect();
+    let timeout_secs = app.config.turn_timeout;
+    let http_c = ctx_ser.http.clone();
+    let ch_obj = msg.channel_id;
+    let room_c = room_arc.clone();
+    let app_c = app.clone();
+    let expected_round = room.round;
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)).await;
+        let mut r = room_c.lock().await;
+        if !r.active || r.round != expected_round {
+            return;
+        }
+        r.active = false;
+        let players_i64: Vec<i64> = r.players.iter().map(|&id| id as i64).collect();
+        let winner = r
+            .scores
+            .iter()
+            .max_by_key(|(_, s)| *s)
+            .map(|(id, _)| *id as i64);
+        drop(r);
+        if !players_i64.is_empty() {
+            app_c.db.lb_add_game(guild_id, &players_i64, winner).await;
+        }
+        let _ = ch_obj
+            .say(
+                &http_c,
+                format!(
+                    "⏰ Hết {} giây không ai nối tiếp! Ván Nối Từ kết thúc.",
+                    timeout_secs
+                ),
+            )
+            .await;
+    })
+    .abort_handle();
+    room.timeout_handle = Some(handle);
     drop(room);
 
     app.db.lb_add_word(guild_id, uid as i64).await;
+    app.db.tournament_add_word(guild_id, uid as i64).await;
 
     if bot_mode {
         let cands =

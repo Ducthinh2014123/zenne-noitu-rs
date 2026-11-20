@@ -11,6 +11,7 @@ use zenne_core::{wiki, AppContext};
 #[derive(Clone)]
 pub struct WsPlayer {
     pub conn_id: String,
+    pub user_id: i64,
     pub name: String,
     pub lives: i64,
     pub score: i64,
@@ -130,7 +131,7 @@ impl WsRoom {
         }
         self.state = "ended".to_string();
         let mut sorted: Vec<&WsPlayer> = self.players.iter().collect();
-        sorted.sort_by(|a, b| b.score.cmp(&a.score));
+        sorted.sort_by_key(|a| std::cmp::Reverse(a.score));
         let winner = alive
             .first()
             .map(|p| p.name.clone())
@@ -161,7 +162,7 @@ pub async fn handle_ws_connection(
     let rid = if room_id.trim().is_empty() {
         "LOBBY".to_string()
     } else {
-        room_id.trim().to_string()
+        room_id.trim().to_uppercase()
     };
 
     let (mut ws_tx, mut ws_rx) = socket.split();
@@ -206,16 +207,59 @@ pub async fn handle_ws_connection(
 
         match msg_type {
             "join" => {
-                let name = val
-                    .get("name")
+                let token = val.get("token").and_then(|v| v.as_str()).unwrap_or("");
+                let Some(claims) =
+                    zenne_core::auth::verify_web_token(&ctx.config.web_token_secret, token)
+                else {
+                    let _ = tx.send(
+                        json!({
+                            "type": "error",
+                            "msg": "Phiên đăng nhập không hợp lệ hoặc đã hết hạn."
+                        })
+                        .to_string(),
+                    );
+                    break;
+                };
+                let token_uid = claims.get("uid").and_then(|v| v.as_i64()).unwrap_or(0);
+                if token_uid == 0 {
+                    let _ = tx.send(
+                        json!({
+                            "type": "error",
+                            "msg": "Token không hợp lệ (thiếu user_id)."
+                        })
+                        .to_string(),
+                    );
+                    break;
+                }
+                let token_name = claims
+                    .get("username")
                     .and_then(|v| v.as_str())
                     .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
+                    .filter(|s| !s.is_empty());
+
+                let name = token_name
+                    .or_else(|| {
+                        val.get("name")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                    })
                     .unwrap_or("Người chơi")
                     .to_string();
 
                 let mut room = room_arc.lock().await;
-                if room.players.iter().any(|p| p.conn_id == conn_id) {
+                if room
+                    .players
+                    .iter()
+                    .any(|p| p.conn_id == conn_id || (token_uid != 0 && p.user_id == token_uid))
+                {
+                    let _ = tx.send(
+                        json!({
+                            "type": "error",
+                            "msg": "Bạn đã ở trong phòng này rồi."
+                        })
+                        .to_string(),
+                    );
                     continue;
                 }
                 if room.players.is_empty() {
@@ -224,6 +268,7 @@ pub async fn handle_ws_connection(
                 let is_host = room.host_conn_id == conn_id;
                 room.players.push(WsPlayer {
                     conn_id: conn_id.clone(),
+                    user_id: token_uid,
                     name: name.clone(),
                     lives: 3,
                     score: 0,
@@ -400,8 +445,10 @@ pub async fn handle_ws_connection(
                     room.used_words.insert(word.to_lowercase());
                     room.current_word = word.clone();
                     room.last_char = wiki::last_syl(&word, &room.lang);
+                    let mut p_uid = 0i64;
                     if let Some(p) = room.players.iter_mut().find(|p| p.conn_id == conn_id) {
                         p.score += 1;
+                        p_uid = p.user_id;
                     }
                     let acc_msg = json!({
                         "type": "word_accepted",
@@ -415,6 +462,10 @@ pub async fn handle_ws_connection(
                         room.advance_turn();
                     }
                     room.broadcast(&room.state_payload());
+                    drop(room);
+                    if p_uid != 0 {
+                        ctx.db.lb_add_word(0, p_uid).await;
+                    }
                 }
             }
             "hint" => {
@@ -500,8 +551,18 @@ pub async fn handle_ws_connection(
                 room.host_conn_id = new_host_id;
                 room.broadcast(&json!({ "type": "new_host", "name": new_host_name }).to_string());
             }
-            if room.turn_idx >= room.players.len() {
-                room.turn_idx = 0;
+            if room.turn_idx >= room.players.len()
+                || room
+                    .players
+                    .get(room.turn_idx)
+                    .map(|p| p.lives <= 0)
+                    .unwrap_or(false)
+            {
+                if let Some(pos) = room.players.iter().position(|p| p.lives > 0) {
+                    room.turn_idx = pos;
+                } else {
+                    room.turn_idx = 0;
+                }
             }
             if let Some(end_msg) = room.check_game_end() {
                 room.broadcast(&end_msg);
@@ -512,6 +573,8 @@ pub async fn handle_ws_connection(
             drop(room);
             ctx.db.update_public_room_players(&rid, p_count).await;
         }
+    } else if room_arc.lock().await.players.is_empty() {
+        rooms.remove(&rid);
     }
 
     writer_task.abort();

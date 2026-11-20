@@ -297,8 +297,13 @@ impl MultiPlayManager {
     }
 
     pub async fn release_worker_guild(&self, worker_id: usize, guild_id: u64) {
-        if let Some((_, vc_id)) = self.worker_guild_assignments.remove(&(guild_id, worker_id)) {
+        let vc_opt = self
+            .worker_guild_assignments
+            .get(&(guild_id, worker_id))
+            .map(|v| *v);
+        if let Some(vc_id) = vc_opt {
             self.release_session(guild_id, vc_id).await;
+            self.worker_guild_assignments.remove(&(guild_id, worker_id));
         } else {
             MusicManager::cleanup_worker_guild_audio(worker_id, guild_id).await;
         }

@@ -595,7 +595,7 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// Bỏ qua bài hát hiện tại
-#[poise::command(slash_command, prefix_command, aliases("s", "next"))]
+#[poise::command(slash_command, prefix_command, aliases("s", "next", "fs"))]
 pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("Chỉ dùng trong server!")?;
     let Some((_, state_arc)) = resolve_target_state(&ctx, guild_id.get()).await else {
@@ -614,7 +614,11 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// Dừng phát nhạc, xóa hàng đợi và rời kênh thoại
-#[poise::command(slash_command, prefix_command, aliases("musicstop", "dc", "leave"))]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("musicstop", "dc", "leave", "disconnect")
+)]
 pub async fn mstop(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("Chỉ dùng trong server!")?;
     let mp = &ctx.data().multiplay;
@@ -730,7 +734,7 @@ pub async fn volume(ctx: Context<'_>, level: u32) -> Result<(), Error> {
 }
 
 /// Chuyển đổi chế độ lặp lại (Tắt -> Bài hiện tại -> Hàng đợi)
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("loop"))]
 pub async fn rloop(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().ok_or("Chỉ dùng trong server!")?;
     let Some((_, state_arc)) = resolve_target_state(&ctx, guild_id.get()).await else {

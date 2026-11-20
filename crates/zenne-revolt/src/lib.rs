@@ -43,6 +43,20 @@ pub async fn run_revolt_bot(ctx: AppContext, games: GameHub) {
     }
     let prefix = ctx.config.revolt_command_prefix.clone();
     let rooms: DashMap<String, RevoltNoituRoom> = DashMap::new();
+    let bot_id: Option<String> = match ctx
+        .http
+        .get("https://api.revolt.chat/users/@me")
+        .header("x-bot-token", &token)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v["_id"].as_str().map(|s| s.to_string())),
+        _ => None,
+    };
 
     loop {
         info!("[Revolt] Dang ket noi WebSocket toi Revolt (Stoat)...");
@@ -86,34 +100,72 @@ pub async fn run_revolt_bot(ctx: AppContext, games: GameHub) {
                                 continue;
                             }
                             let author_id = ev["author"].as_str().unwrap_or("user").to_string();
+                            if bot_id.as_deref() == Some(author_id.as_str()) {
+                                continue;
+                            }
                             let ch_hash = ch_id_hash(channel_id);
 
                             if !content.starts_with(&prefix) {
-                                if let Some((true, ans)) = games.vuatiengviet.check_answer(ch_hash, content) {
-                                    send_revolt_msg(&ctx.http, &token, channel_id, &format!("🎉 Chính xác VTV: **{}**!", ans)).await;
+                                if let Some((true, ans)) =
+                                    games.vuatiengviet.check_answer(ch_hash, content)
+                                {
+                                    send_revolt_msg(
+                                        &ctx.http,
+                                        &token,
+                                        channel_id,
+                                        &format!("🎉 Chính xác VTV: **{}**!", ans),
+                                    )
+                                    .await;
                                     continue;
                                 }
-                                if let Some((true, ans)) = games.cadao.check_answer(ch_hash, content) {
-                                    send_revolt_msg(&ctx.http, &token, channel_id, &format!("🌾 Chính xác Ca Dao: **{}**!", ans)).await;
+                                if let Some((true, ans)) =
+                                    games.cadao.check_answer(ch_hash, content)
+                                {
+                                    send_revolt_msg(
+                                        &ctx.http,
+                                        &token,
+                                        channel_id,
+                                        &format!("🌾 Chính xác Ca Dao: **{}**!", ans),
+                                    )
+                                    .await;
                                     continue;
                                 }
-                                if let Some((true, ans)) = games.chinhta.check_answer(ch_hash, content) {
-                                    send_revolt_msg(&ctx.http, &token, channel_id, &format!("✍️ Chuẩn chính tả: **{}**!", ans)).await;
+                                if let Some((true, ans)) =
+                                    games.chinhta.check_answer(ch_hash, content)
+                                {
+                                    send_revolt_msg(
+                                        &ctx.http,
+                                        &token,
+                                        channel_id,
+                                        &format!("✍️ Chuẩn chính tả: **{}**!", ans),
+                                    )
+                                    .await;
                                     continue;
                                 }
-                                if let Some((true, ans)) = games.flag_quiz.check_answer(ch_hash, content) {
-                                    send_revolt_msg(&ctx.http, &token, channel_id, &format!("🌍 Chính xác Quốc kỳ: **{}**!", ans)).await;
+                                if let Some((true, ans)) =
+                                    games.flag_quiz.check_answer(ch_hash, content)
+                                {
+                                    send_revolt_msg(
+                                        &ctx.http,
+                                        &token,
+                                        channel_id,
+                                        &format!("🌍 Chính xác Quốc kỳ: **{}**!", ans),
+                                    )
+                                    .await;
                                     continue;
                                 }
                                 let upper = content.trim().to_uppercase();
                                 if matches!(upper.as_str(), "A" | "B" | "C" | "D") {
-                                    if let Some((ok, right_ans)) = games.quiz.answer(ch_hash, &upper) {
+                                    if let Some((ok, right_ans)) =
+                                        games.quiz.answer(ch_hash, &upper)
+                                    {
                                         let msg_txt = if ok {
                                             format!("✅ Chính xác! Đáp án: **{}**", right_ans)
                                         } else {
                                             format!("❌ Sai rồi! Đáp án đúng là **{}**.", right_ans)
                                         };
-                                        send_revolt_msg(&ctx.http, &token, channel_id, &msg_txt).await;
+                                        send_revolt_msg(&ctx.http, &token, channel_id, &msg_txt)
+                                            .await;
                                         continue;
                                     }
                                 }
@@ -123,16 +175,27 @@ pub async fn run_revolt_bot(ctx: AppContext, games: GameHub) {
                                         continue;
                                     }
                                     let word = wiki::normalize_word(content);
-                                    if word.is_empty() || !wiki::valid_chain(&r.current_word, &word, &r.lang) {
+                                    if word.is_empty()
+                                        || !wiki::valid_chain(&r.current_word, &word, &r.lang)
+                                    {
                                         continue;
                                     }
                                     if r.used.contains(&word.to_lowercase()) {
-                                        send_revolt_msg(&ctx.http, &token, channel_id, &format!("🔁 Từ `{}` đã dùng rồi!", word)).await;
+                                        send_revolt_msg(
+                                            &ctx.http,
+                                            &token,
+                                            channel_id,
+                                            &format!("🔁 Từ `{}` đã dùng rồi!", word),
+                                        )
+                                        .await;
                                         continue;
                                     }
                                     let lang = r.lang.clone();
                                     drop(r);
-                                    let (ok, _) = wiki::check_word(&ctx.http, &ctx.db, &ctx.cache, 0, &lang, &word).await;
+                                    let (ok, _) = wiki::check_word(
+                                        &ctx.http, &ctx.db, &ctx.cache, 0, &lang, &word,
+                                    )
+                                    .await;
                                     if ok {
                                         if let Some(mut r) = rooms.get_mut(channel_id) {
                                             r.used.insert(word.to_lowercase());
@@ -141,11 +204,18 @@ pub async fn run_revolt_bot(ctx: AppContext, games: GameHub) {
                                             *r.scores.entry(author_id).or_insert(0) += 1;
                                             let next_syl = r.last_syl.clone();
                                             let solo = r.solo;
-                                            let used_vec: Vec<String> = r.used.iter().cloned().collect();
+                                            let used_vec: Vec<String> =
+                                                r.used.iter().cloned().collect();
                                             drop(r);
-                                            let mut reply = format!("✅ `{}` (+1đ) | Nối tiếp: **{}**", word, next_syl);
+                                            let mut reply = format!(
+                                                "✅ `{}` (+1đ) | Nối tiếp: **{}**",
+                                                word, next_syl
+                                            );
                                             if solo {
-                                                let sugs = wiki::find_continuations(&ctx.db, 0, &lang, &next_syl, &used_vec, 5).await;
+                                                let sugs = wiki::find_continuations(
+                                                    &ctx.db, 0, &lang, &next_syl, &used_vec, 5,
+                                                )
+                                                .await;
                                                 if let Some(bw) = sugs.first() {
                                                     if let Some(mut r) = rooms.get_mut(channel_id) {
                                                         r.used.insert(bw.to_lowercase());
@@ -155,7 +225,8 @@ pub async fn run_revolt_bot(ctx: AppContext, games: GameHub) {
                                                     }
                                                 }
                                             }
-                                            send_revolt_msg(&ctx.http, &token, channel_id, &reply).await;
+                                            send_revolt_msg(&ctx.http, &token, channel_id, &reply)
+                                                .await;
                                         }
                                     }
                                 }
@@ -196,6 +267,44 @@ pub async fn run_revolt_bot(ctx: AppContext, games: GameHub) {
                                         let s: Vec<String> = r.scores.iter().map(|(u, p)| format!("{}: **{}**", u, p)).collect();
                                         if s.is_empty() { "📊 Chưa ai ghi điểm.".to_string() } else { format!("📊 Điểm: {}", s.join(" | ")) }
                                     } else { "❌ Chưa có ván nối từ nào.".to_string() }
+                                }
+                                "top" | "bxh" | "leaderboard" => {
+                                    let rows = ctx.db.lb_get_top(0, 5).await;
+                                    if rows.is_empty() {
+                                        "🏆 Chưa có bảng xếp hạng.".to_string()
+                                    } else {
+                                        let s: Vec<String> = rows.iter().enumerate().map(|(i, r)| format!("{}. ID {}: **{}** từ", i + 1, r.user_id, r.total_words)).collect();
+                                        format!("🏆 **Top Nối Từ:**\n{}", s.join("\n"))
+                                    }
+                                }
+                                "taophong" | "create" => {
+                                    let rid = format!("{:06X}", ch_hash & 0xFFFFFF);
+                                    let name = if arg.is_empty() { "Phòng Revolt".to_string() } else { arg.to_string() };
+                                    let url = format!("{}/pub/play/{}", ctx.config.web_base_url.trim_end_matches('/'), rid);
+                                    ctx.db.create_public_room(&zenne_core::db::PublicRoomRow {
+                                        room_id: rid.clone(),
+                                        name: name.clone(),
+                                        platform: "revolt".to_string(),
+                                        host_id: author_id.clone(),
+                                        host_name: author_id.clone(),
+                                        lang: "vi".to_string(),
+                                        max_players: 0,
+                                        current_players: 1,
+                                        join_token: None,
+                                        web_url: Some(url.clone()),
+                                        tele_url: None,
+                                        status: "waiting".to_string(),
+                                    }).await;
+                                    format!("🌐 Đã tạo phòng **{}** (`[{}]`): {}", name, rid, url)
+                                }
+                                "phong" | "rooms" => {
+                                    let list = ctx.db.get_public_rooms().await;
+                                    if list.is_empty() {
+                                        "🌐 Hiện chưa có phòng công khai nào.".to_string()
+                                    } else {
+                                        let s: Vec<String> = list.iter().take(5).map(|r| format!("• **[{}]** {} ({})", r.room_id, r.name, r.platform)).collect();
+                                        format!("🌐 **Phòng đang mở:**\n{}", s.join("\n"))
+                                    }
                                 }
                                 "tratu" | "check" if !arg.is_empty() => {
                                     let (ok, _) = wiki::check_word(&ctx.http, &ctx.db, &ctx.cache, 0, "vi", arg).await;
