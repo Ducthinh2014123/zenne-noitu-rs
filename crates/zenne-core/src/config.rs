@@ -61,10 +61,17 @@ impl AppConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let super_admin_ids = env_str("SUPER_ADMIN_IDS", "1177130080259219507")
+        let mut super_admin_ids: Vec<u64> = env_str("SUPER_ADMIN_IDS", "1395221255589986374")
             .split(',')
             .filter_map(|s| s.trim().parse::<u64>().ok())
             .collect();
+        for extra_key in ["SUPER_ADMIN", "ADMIN_ID"] {
+            if let Ok(id) = env_str(extra_key, "").parse::<u64>() {
+                if !super_admin_ids.contains(&id) {
+                    super_admin_ids.push(id);
+                }
+            }
+        }
 
         let api_key = env_str("API_KEY", "Duc thinh 1234@");
         let web_token_secret = env_str("WEB_TOKEN_SECRET", &api_key);
