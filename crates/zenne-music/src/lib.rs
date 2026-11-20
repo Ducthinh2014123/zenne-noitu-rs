@@ -50,16 +50,66 @@ pub struct GuildMusicState {
 pub struct MusicManager {
     pub http: Client,
     pub client_id: String,
+    pub sc_client_cache: Arc<tokio::sync::RwLock<(String, std::time::Instant)>>,
     pub states: Arc<DashMap<u64, Arc<Mutex<GuildMusicState>>>>,
 }
 
 impl MusicManager {
     pub fn new(http: Client, client_id: String) -> Self {
+        let expires = std::time::Instant::now() + std::time::Duration::from_secs(86_400);
         Self {
             http,
+            sc_client_cache: Arc::new(tokio::sync::RwLock::new((client_id.clone(), expires))),
             client_id,
             states: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Tự động lấy hoặc gia hạn SoundCloud `client_id` từ JS bundle (cache 24h, giống `music_system.py`).
+    pub async fn get_soundcloud_client_id(&self, force_refresh: bool) -> String {
+        if !force_refresh {
+            let guard = self.sc_client_cache.read().await;
+            if std::time::Instant::now() < guard.1 && !guard.0.is_empty() {
+                return guard.0.clone();
+            }
+        }
+        if let Ok(html) = self.http.get("https://soundcloud.com").send().await {
+            if let Ok(body) = html.text().await {
+                static RE_JS: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+                static RE_CID: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+                let re_js = RE_JS.get_or_init(|| {
+                    Regex::new(r#"https://a-v2\.sndcdn\.com/assets/[a-zA-Z0-9\-_.]+\.js"#).unwrap()
+                });
+                let re_cid = RE_CID
+                    .get_or_init(|| Regex::new(r#"client_id[:=]"([a-zA-Z0-9]{32})""#).unwrap());
+                let js_urls: Vec<String> = re_js
+                    .find_iter(&body)
+                    .map(|m| m.as_str().to_string())
+                    .collect();
+                for js_url in js_urls.iter().rev().take(6) {
+                    if let Ok(resp) = self.http.get(js_url).send().await {
+                        if let Ok(js_txt) = resp.text().await {
+                            if let Some(caps) = re_cid.captures(&js_txt) {
+                                if let Some(cid) = caps.get(1) {
+                                    let new_cid = cid.as_str().to_string();
+                                    let mut guard = self.sc_client_cache.write().await;
+                                    *guard = (
+                                        new_cid.clone(),
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(86_400),
+                                    );
+                                    tracing::info!(
+                                        "[SoundCloud] Đã tự động làm mới client_id thành công!"
+                                    );
+                                    return new_cid;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.sc_client_cache.read().await.0.clone()
     }
 
     pub fn get_state(&self, guild_id: u64) -> Arc<Mutex<GuildMusicState>> {
@@ -117,6 +167,7 @@ impl MusicManager {
         requester_name: &str,
     ) -> Result<SoundcloudTrack, String> {
         let cleaned = Self::clean_query(query);
+        let mut cid = self.get_soundcloud_client_id(false).await;
         let track_data: serde_json::Value = if is_url_flag {
             // Mở rộng link rút gọn (on.soundcloud.com) & bỏ query tracking (?si=..., ?ref=...)
             let mut target_url = cleaned.clone();
@@ -134,13 +185,23 @@ impl MusicManager {
                 target_url = u.to_string();
             }
 
-            let res = self
+            let mut res = self
                 .http
                 .get("https://api-v2.soundcloud.com/resolve")
-                .query(&[("url", target_url.as_str()), ("client_id", &self.client_id)])
+                .query(&[("url", target_url.as_str()), ("client_id", cid.as_str())])
                 .send()
                 .await
                 .map_err(|e| format!("Lỗi kết nối SoundCloud: {}", e))?;
+            if matches!(res.status().as_u16(), 401 | 403) {
+                cid = self.get_soundcloud_client_id(true).await;
+                res = self
+                    .http
+                    .get("https://api-v2.soundcloud.com/resolve")
+                    .query(&[("url", target_url.as_str()), ("client_id", cid.as_str())])
+                    .send()
+                    .await
+                    .map_err(|e| format!("Lỗi kết nối SoundCloud: {}", e))?;
+            }
             if !res.status().is_success() {
                 return Err(format!("SoundCloud API trả về HTTP {}", res.status()));
             }
@@ -153,7 +214,7 @@ impl MusicManager {
                 {
                     let tr_url = format!(
                         "https://api-v2.soundcloud.com/tracks/{}?client_id={}",
-                        first_id, self.client_id
+                        first_id, cid
                     );
                     if let Ok(tr_res) = self.http.get(&tr_url).send().await {
                         if tr_res.status().is_success() {
@@ -166,17 +227,31 @@ impl MusicManager {
             }
             json
         } else {
-            let res = self
+            let mut res = self
                 .http
                 .get("https://api-v2.soundcloud.com/search/tracks")
                 .query(&[
                     ("q", cleaned.as_str()),
-                    ("client_id", &self.client_id),
+                    ("client_id", cid.as_str()),
                     ("limit", "5"),
                 ])
                 .send()
                 .await
                 .map_err(|e| format!("Lỗi tìm kiếm SoundCloud: {}", e))?;
+            if matches!(res.status().as_u16(), 401 | 403) {
+                cid = self.get_soundcloud_client_id(true).await;
+                res = self
+                    .http
+                    .get("https://api-v2.soundcloud.com/search/tracks")
+                    .query(&[
+                        ("q", cleaned.as_str()),
+                        ("client_id", cid.as_str()),
+                        ("limit", "5"),
+                    ])
+                    .send()
+                    .await
+                    .map_err(|e| format!("Lỗi tìm kiếm SoundCloud: {}", e))?;
+            }
             if !res.status().is_success() {
                 return Err(format!("SoundCloud Search API lỗi HTTP {}", res.status()));
             }
@@ -197,13 +272,24 @@ impl MusicManager {
             .ok_or_else(|| "Bài hát không có luồng âm thanh khả dụng.".to_string())?;
 
         let mut stream_url = None;
+        let mut cur_cid = cid;
         for tc in transcodings {
             let Some(tc_url) = tc["url"].as_str() else {
                 continue;
             };
             let sep = if tc_url.contains('?') { '&' } else { '?' };
-            let req_url = format!("{}{}client_id={}", tc_url, sep, self.client_id);
-            if let Ok(r) = self.http.get(&req_url).send().await {
+            let req_url = format!("{}{}client_id={}", tc_url, sep, cur_cid);
+            if let Ok(mut r) = self.http.get(&req_url).send().await {
+                if r.status().as_u16() == 401 || r.status().as_u16() == 403 {
+                    let fresh_cid = self.get_soundcloud_client_id(true).await;
+                    if !fresh_cid.is_empty() {
+                        cur_cid = fresh_cid;
+                        let retry_url = format!("{}{}client_id={}", tc_url, sep, cur_cid);
+                        if let Ok(r2) = self.http.get(&retry_url).send().await {
+                            r = r2;
+                        }
+                    }
+                }
                 if r.status().is_success() {
                     if let Ok(j) = r.json::<serde_json::Value>().await {
                         if let Some(u) = j["url"].as_str() {
@@ -269,6 +355,9 @@ impl MusicManager {
             .send()
             .await
             .map_err(|e| format!("Lỗi tải playlist SoundCloud: {}", e))?;
+        if !res.status().is_success() {
+            return Err(format!("SoundCloud trả về HTTP {}", res.status()));
+        }
         let bytes = res.bytes().await.map_err(|e| e.to_string())?;
         let tmp_dir = std::env::temp_dir();
 
@@ -277,7 +366,8 @@ impl MusicManager {
             let base = Url::parse(stream_url).map_err(|e| e.to_string())?;
             let mut urls = Vec::new();
 
-            let map_re = Regex::new(r#"#EXT-X-MAP:URI="([^"]+)""#).unwrap();
+            static MAP_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+            let map_re = MAP_RE.get_or_init(|| Regex::new(r#"#EXT-X-MAP:URI="([^"]+)""#).unwrap());
             let is_fmp4 = map_re.is_match(&text) || text.contains(".m4s");
             if let Some(cap) = map_re.captures(&text) {
                 if let Ok(u) = base.join(&cap[1]) {

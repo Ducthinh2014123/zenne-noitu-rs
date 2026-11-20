@@ -5,7 +5,18 @@ use reqwest::Client;
 use serde_json::Value;
 
 pub fn normalize_word(raw: &str) -> String {
-    raw.split_whitespace()
+    let cleaned: String = raw
+        .chars()
+        .filter(|&c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{200b}'..='\u{200d}' | '\u{feff}' | '\u{200e}' | '\u{200f}'
+                )
+        })
+        .collect();
+    cleaned
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .trim()
@@ -47,7 +58,7 @@ pub fn valid_chain(prev: &str, nxt: &str, lang: &str) -> bool {
 
 pub fn is_valid_for_lang(word: &str, _lang: &str) -> bool {
     let w = word.trim();
-    if w.is_empty() || w.len() > 80 {
+    if w.is_empty() || w.chars().count() > 80 {
         return false;
     }
     // Từ phải chứa ít nhất 1 chữ cái
@@ -93,6 +104,35 @@ pub async fn check_word(
 
     // 4. Tra Wikipedia REST API + Wiktionary
     let encoded = urlencoding_simple(&word);
+    let wiktionary_primary = matches!(
+        lang,
+        "en" | "ja" | "ko" | "zh" | "fr" | "de" | "es" | "ru" | "th" | "id"
+    );
+    let mut definitive_miss = false;
+
+    if wiktionary_primary {
+        let wikt_url = format!(
+            "https://{}.wiktionary.org/w/api.php?action=query&titles={}&format=json",
+            lang, encoded
+        );
+        if let Ok(res) = http.get(&wikt_url).send().await {
+            if res.status().is_success() {
+                if let Ok(json) = res.json::<Value>().await {
+                    if let Some(pages) = json["query"]["pages"].as_object() {
+                        if pages.keys().any(|k| k != "-1") {
+                            db.cache_add(lang, &word).await;
+                            cache.set(&ckey, "1", 86400).await;
+                            return (true, None);
+                        }
+                        definitive_miss = true;
+                    }
+                }
+            } else if res.status().as_u16() == 404 {
+                definitive_miss = true;
+            }
+        }
+    }
+
     let wiki_url = format!(
         "https://{}.wikipedia.org/api/rest_v1/page/summary/{}",
         lang, encoded
@@ -111,29 +151,39 @@ pub async fn check_word(
                     cache.set(&ckey, "1", 86400).await;
                     return (true, extract);
                 }
+                definitive_miss = true;
             }
+        } else if res.status().as_u16() == 404 {
+            definitive_miss = true;
         }
     }
 
-    let wikt_url = format!(
-        "https://{}.wiktionary.org/w/api.php?action=query&titles={}&format=json",
-        lang, encoded
-    );
-    if let Ok(res) = http.get(&wikt_url).send().await {
-        if res.status().is_success() {
-            if let Ok(json) = res.json::<Value>().await {
-                if let Some(pages) = json["query"]["pages"].as_object() {
-                    if pages.keys().any(|k| k != "-1") {
-                        db.cache_add(lang, &word).await;
-                        cache.set(&ckey, "1", 86400).await;
-                        return (true, None);
+    if !wiktionary_primary {
+        let wikt_url = format!(
+            "https://{}.wiktionary.org/w/api.php?action=query&titles={}&format=json",
+            lang, encoded
+        );
+        if let Ok(res) = http.get(&wikt_url).send().await {
+            if res.status().is_success() {
+                if let Ok(json) = res.json::<Value>().await {
+                    if let Some(pages) = json["query"]["pages"].as_object() {
+                        if pages.keys().any(|k| k != "-1") {
+                            db.cache_add(lang, &word).await;
+                            cache.set(&ckey, "1", 86400).await;
+                            return (true, None);
+                        }
+                        definitive_miss = true;
                     }
                 }
+            } else if res.status().as_u16() == 404 {
+                definitive_miss = true;
             }
         }
     }
 
-    cache.set(&ckey, "0", 3600).await;
+    if definitive_miss {
+        cache.set(&ckey, "0", 3600).await;
+    }
     (false, None)
 }
 
@@ -231,5 +281,12 @@ mod tests {
 
         assert!(valid_chain("apple", "elephant", "en"));
         assert!(!valid_chain("apple", "banana", "en"));
+
+        assert_eq!(normalize_word("hòa\u{200b} bình\u{feff}"), "hòa bình");
+        let utf8_50 = "ả".repeat(50);
+        assert!(utf8_50.len() > 80);
+        assert!(is_valid_for_lang(&utf8_50, "vi"));
+        let utf8_81 = "ả".repeat(81);
+        assert!(!is_valid_for_lang(&utf8_81, "vi"));
     }
 }

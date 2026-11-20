@@ -24,7 +24,11 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
 /// Hiển thị bảng trợ giúp tất cả các lệnh Zenne Bot
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("noitu_help", "help_noitu", "helpnoitu", "huongdan")
+)]
 async fn help(ctx: Context<'_>) -> Result<(), Error> {
     let embed = serenity::CreateEmbed::new()
         .title("🤖 Zenne Bot Rust Edition — Bảng Lệnh")
@@ -48,11 +52,57 @@ async fn help(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Strict authorization for `/resetpassword_admin`:
+/// ONLY explicitly configured bot owners / designated recovery administrators (`super_admin_ids`).
+/// Ordinary Discord Guild Administrator permission MUST NOT grant access.
+pub(crate) fn can_invoke_admin_recovery(uid: u64, super_admins: &[u64]) -> bool {
+    super_admins.contains(&uid)
+}
+
+pub(crate) async fn is_bot_admin(ctx: Context<'_>) -> bool {
+    let uid = ctx.author().id.get();
+    let super_admins = &ctx.data().app.config.super_admin_ids;
+    let has_guild_admin_perm = if let Some(guild_id) = ctx.guild_id() {
+        if let Some(member) = ctx.author_member().await {
+            if let Some(guild) = ctx.cache().guild(guild_id) {
+                #[allow(deprecated)]
+                let perms = guild.member_permissions(&member);
+                perms.administrator()
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    can_invoke_admin_recovery(uid, super_admins) || has_guild_admin_perm
+}
+
+pub(crate) async fn is_guild_admin(ctx: Context<'_>) -> bool {
+    let uid = ctx.author().id.get();
+    if ctx.data().app.config.super_admin_ids.contains(&uid) {
+        return true;
+    }
+    let Some(guild_id) = ctx.guild_id() else {
+        return true;
+    };
+    if let Some(member) = ctx.author_member().await {
+        if let Some(guild) = ctx.cache().guild(guild_id) {
+            #[allow(deprecated)]
+            let perms = guild.member_permissions(&member);
+            return perms.administrator() || perms.manage_guild() || perms.manage_channels();
+        }
+    }
+    false
+}
+
 /// Bắt đầu ván Nối Từ trong kênh hiện tại
 #[poise::command(
     slash_command,
     prefix_command,
-    aliases("batdautro", "bdt", "startgame")
+    aliases("batdautro", "bdt", "startgame", "noitu_start")
 )]
 async fn start(
     ctx: Context<'_>,
@@ -60,6 +110,16 @@ async fn start(
 ) -> Result<(), Error> {
     let ch_id = ctx.channel_id().get();
     let guild_id = ctx.guild_id().map(|g| g.get() as i64).unwrap_or(0);
+    if let Some(fixed_ch) = ctx.data().app.db.get_game_channel(guild_id).await {
+        if fixed_ch != ch_id as i64 {
+            ctx.say(format!(
+                "⚠️ Server đã cố định kênh Nối Từ tại <#{}>!",
+                fixed_ch
+            ))
+            .await?;
+            return Ok(());
+        }
+    }
     let lang = ctx.data().app.db.get_lang(guild_id).await;
     let first_word = wiki::random_word(&ctx.data().app.http, &ctx.data().app.db, &lang).await;
     let bot_mode = mode
@@ -94,18 +154,57 @@ async fn start(
 }
 
 /// Dừng ván Nối Từ đang diễn ra
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("noitu_stop", "end"))]
 async fn stop(ctx: Context<'_>) -> Result<(), Error> {
+    let is_admin = is_guild_admin(ctx).await;
+    let uid = ctx.author().id.get();
+    let guild_id = ctx.guild_id().map(|g| g.get() as i64).unwrap_or(0);
     let room_arc = ctx.data().noitu.get_room(ctx.channel_id().get());
-    let mut r = room_arc.lock().await;
-    r.active = false;
+    let (players_i64, winner) = {
+        let mut r = room_arc.lock().await;
+        if !r.active {
+            ctx.say("❌ Hiện không có ván Nối Từ nào đang diễn ra.")
+                .await?;
+            return Ok(());
+        }
+        if !is_admin && r.players.first() != Some(&uid) {
+            ctx.say("⛔ Chỉ chủ phòng hoặc Admin mới được dừng ván chơi!")
+                .await?;
+            return Ok(());
+        }
+        r.cancel_timeout();
+        r.active = false;
+        let p: Vec<i64> = r.players.iter().map(|&id| id as i64).collect();
+        let w = r
+            .scores
+            .iter()
+            .max_by_key(|(_, s)| *s)
+            .map(|(id, _)| *id as i64);
+        (p, w)
+    };
+    if !players_i64.is_empty() {
+        ctx.data()
+            .app
+            .db
+            .lb_add_game(guild_id, &players_i64, winner)
+            .await;
+    }
     ctx.say("🛑 Đã kết thúc ván Nối Từ trong kênh này!").await?;
     Ok(())
 }
 
 /// Đổi ngôn ngữ từ điển Nối Từ (vi, en, ja, ko, zh, ...)
-#[poise::command(slash_command, prefix_command, aliases("setngonngu"))]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("setngonngu", "noitu_setlang", "lang", "ngonngu", "language")
+)]
 async fn setlang(ctx: Context<'_>, code: String) -> Result<(), Error> {
+    if !is_guild_admin(ctx).await {
+        ctx.say("⛔ Bạn cần quyền Quản lý Server (Manage Guild) để đổi ngôn ngữ!")
+            .await?;
+        return Ok(());
+    }
     let guild_id = ctx.guild_id().map(|g| g.get() as i64).unwrap_or(0);
     let c = code.trim().to_lowercase();
     ctx.data().app.db.set_lang(guild_id, &c).await;
@@ -119,8 +218,13 @@ async fn setlang(ctx: Context<'_>, code: String) -> Result<(), Error> {
 }
 
 /// Đổi ngôn ngữ giao diện thông báo của bot
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("uilang", "ngugiaodien"))]
 async fn setuilang(ctx: Context<'_>, code: String) -> Result<(), Error> {
+    if !is_guild_admin(ctx).await {
+        ctx.say("⛔ Bạn cần quyền Quản lý Server (Manage Guild) để đổi ngôn ngữ giao diện!")
+            .await?;
+        return Ok(());
+    }
     let guild_id = ctx.guild_id().map(|g| g.get() as i64).unwrap_or(0);
     let c = code.trim().to_lowercase();
     if !i18n::is_known_ui_lang(&c) {
@@ -134,7 +238,7 @@ async fn setuilang(ctx: Context<'_>, code: String) -> Result<(), Error> {
 }
 
 /// Tra từ trên Wikipedia / Wiktionary
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("check", "kt", "tra"))]
 async fn tratu(ctx: Context<'_>, #[rest] word: String) -> Result<(), Error> {
     let guild_id = ctx.guild_id().map(|g| g.get() as i64).unwrap_or(0);
     let lang = ctx.data().app.db.get_lang(guild_id).await;
@@ -166,7 +270,11 @@ async fn tratu(ctx: Context<'_>, #[rest] word: String) -> Result<(), Error> {
 }
 
 /// Xem bảng xếp hạng Nối Từ của server
-#[poise::command(slash_command, prefix_command, aliases("lb"))]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("lb", "top_noitu", "bxh", "xephang")
+)]
 async fn top(ctx: Context<'_>) -> Result<(), Error> {
     let guild_id = ctx.guild_id().map(|g| g.get() as i64).unwrap_or(0);
     let rows = ctx.data().app.db.lb_get_top(guild_id, 10).await;
@@ -194,7 +302,7 @@ async fn top(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// Đề nghị thêm từ vào ngân hàng từ của server
-#[poise::command(prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("addword", "gtt"))]
 async fn gopthemtu(ctx: Context<'_>, #[rest] word: String) -> Result<(), Error> {
     let guild_id = ctx.guild_id().map(|g| g.get() as i64).unwrap_or(0);
     let w = wiki::normalize_word(&word);
@@ -220,7 +328,7 @@ async fn gopthemtu(ctx: Context<'_>, #[rest] word: String) -> Result<(), Error> 
 }
 
 /// Hỏi trợ lý AI Kira
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("hoi", "ai", "hoiai"))]
 async fn ask(ctx: Context<'_>, #[rest] prompt: String) -> Result<(), Error> {
     ctx.defer().await?;
     let cfg = &ctx.data().app.config;
@@ -263,7 +371,7 @@ async fn afk(ctx: Context<'_>, #[rest] reason: Option<String>) -> Result<(), Err
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("tx"))]
+#[poise::command(slash_command, prefix_command, aliases("tx", "xucxac"))]
 async fn taixiu(ctx: Context<'_>) -> Result<(), Error> {
     let r = taixiu::roll_taixiu();
     let kq = if r.is_triple {
@@ -281,7 +389,7 @@ async fn taixiu(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("bc"))]
+#[poise::command(slash_command, prefix_command, aliases("bc", "tomca"))]
 async fn baucua(ctx: Context<'_>) -> Result<(), Error> {
     let r = baucua::roll_baucua();
     ctx.say(format!(
@@ -297,7 +405,7 @@ async fn baucua(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("vuatiengviet", "xapchu"))]
 async fn vtv(ctx: Context<'_>, guess: Option<String>) -> Result<(), Error> {
     let ch = ctx.channel_id().get();
     if let Some(g) = guess {
@@ -320,7 +428,7 @@ async fn vtv(ctx: Context<'_>, guess: Option<String>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("quizz", "giaido", "dautri"))]
 async fn quiz(ctx: Context<'_>, answer: Option<String>) -> Result<(), Error> {
     let ch = ctx.channel_id().get();
     if let Some(ans) = answer {
@@ -343,7 +451,7 @@ async fn quiz(ctx: Context<'_>, answer: Option<String>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("toan"))]
 async fn quizmath(ctx: Context<'_>) -> Result<(), Error> {
     let q = ctx.data().games.quiz.start_math(ctx.channel_id().get());
     ctx.say(format!(
@@ -386,7 +494,7 @@ async fn wordle(ctx: Context<'_>, guess: Option<String>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("doichu", "ghepchu"))]
 async fn anagram(ctx: Context<'_>, guess: Option<String>) -> Result<(), Error> {
     let ch = ctx.channel_id().get();
     if let Some(g) = guess {
@@ -409,7 +517,7 @@ async fn anagram(ctx: Context<'_>, guess: Option<String>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("thuyachien", "naval"))]
 async fn battleship(ctx: Context<'_>, coord: Option<String>) -> Result<(), Error> {
     let ch = ctx.channel_id().get();
     if let Some(c) = coord {
@@ -440,7 +548,7 @@ async fn battleship(ctx: Context<'_>, coord: Option<String>) -> Result<(), Error
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command)]
+#[poise::command(slash_command, prefix_command, aliases("latthe", "trinho"))]
 async fn memory(ctx: Context<'_>, a: Option<usize>, b: Option<usize>) -> Result<(), Error> {
     let ch = ctx.channel_id().get();
     if let (Some(x), Some(y)) = (a, b) {
@@ -501,7 +609,7 @@ async fn event_handler(
                     });
                 }
             }
-            list.sort_by(|a, b| b.member_count.cmp(&a.member_count));
+            list.sort_by_key(|a| std::cmp::Reverse(a.member_count));
             let mut live = data.app.live.write().await;
             live.online = true;
             live.guild_count = guilds.len();
@@ -656,6 +764,7 @@ fn all_commands() -> Vec<poise::Command<Data, Error>> {
         extra_cmds::tochucgiaidau(),
         extra_cmds::xemgiaidau(),
         extra_cmds::ketthucgiaidau(),
+        extra_cmds::resetpassword_admin(),
         extra_cmds::revoke_2fa(),
         extra_cmds::nowplaying(),
         extra_cmds::cadao(),
@@ -671,6 +780,11 @@ fn all_commands() -> Vec<poise::Command<Data, Error>> {
         extra_cmds::catword(),
         extra_cmds::tamsao(),
         extra_cmds::sudoku(),
+        extra_cmds::thamgiagiaidau(),
+        extra_cmds::duyettu(),
+        extra_cmds::connect4(),
+        extra_cmds::uno(),
+        extra_cmds::wikiquiz(),
     ]
 }
 
@@ -723,6 +837,9 @@ mod tests {
             "chinhta",
             "flag",
             "trieuphu",
+            "resetpassword_admin",
+            "revoke_2fa",
+            "wikiquiz",
         ] {
             assert!(
                 names.contains(&expected.to_string()),
@@ -730,6 +847,63 @@ mod tests {
                 expected
             );
         }
-        assert!(cmds.len() >= 27);
+        assert_eq!(cmds.len(), 62);
+
+        // Verify no duplicate command names or aliases
+        let mut seen = std::collections::HashSet::new();
+        for c in &cmds {
+            assert!(seen.insert(c.name.clone()), "Duplicate cmd: {}", c.name);
+            for a in &c.aliases {
+                assert!(seen.insert(a.clone()), "Duplicate alias: {}", a);
+            }
+            assert!(
+                c.slash_action.is_some(),
+                "Missing slash_action on {}",
+                c.name
+            );
+            if c.name == "resetpassword_admin" {
+                assert!(
+                    c.prefix_action.is_none(),
+                    "resetpassword_admin must be slash-only"
+                );
+                assert!(
+                    c.aliases.is_empty(),
+                    "resetpassword_admin must not have aliases"
+                );
+            } else {
+                assert!(
+                    c.prefix_action.is_some(),
+                    "Missing prefix_action on {}",
+                    c.name
+                );
+            }
+        }
+
+        // Verify ONLY /resetpassword_admin exists for admin recovery (no admin_recovery alias/cmd)
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| c.name == "resetpassword_admin")
+                .count(),
+            1
+        );
+        assert!(!seen.contains("admin_recovery"));
+        assert!(seen.contains("wikiquiz"));
+        assert!(seen.contains("dinhnghia"));
+        assert!(seen.contains("noitu_start"));
+        assert!(seen.contains("noitu_stop"));
+        assert!(seen.contains("noitu_setlang"));
+        assert!(seen.contains("vuatiengviet"));
+        assert!(seen.contains("quizz"));
+    }
+
+    #[test]
+    fn test_admin_recovery_authorization_rejects_unauthorized() {
+        let super_admins = vec![111_222_333u64];
+        // 1. Authorized recovery administrator can issue a token
+        assert!(can_invoke_admin_recovery(111_222_333, &super_admins));
+        // 2. Unauthorized user cannot issue a token
+        assert!(!can_invoke_admin_recovery(999_888_777, &super_admins));
+        // 3. Ordinary Guild Administrator (not in super_admins) cannot issue
+        assert!(!can_invoke_admin_recovery(444_555_666, &super_admins));
     }
 }

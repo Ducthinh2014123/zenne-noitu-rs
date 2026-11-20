@@ -83,7 +83,6 @@ impl NoituRoomState {
 #[derive(Debug, Clone)]
 pub struct VtvSession {
     pub target: String,
-    pub scrambled: String,
     pub started_at: std::time::Instant,
 }
 

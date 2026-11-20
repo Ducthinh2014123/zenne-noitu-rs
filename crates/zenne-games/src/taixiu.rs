@@ -14,7 +14,7 @@ pub fn roll_taixiu() -> TaiXiuResult {
     let d3 = rng.gen_range(1..=6);
     let total = d1 + d2 + d3;
     let is_triple = d1 == d2 && d2 == d3;
-    let is_tai = total >= 11 && total <= 17 && !is_triple;
+    let is_tai = (11..=17).contains(&total) && !is_triple;
     TaiXiuResult {
         dice: [d1, d2, d3],
         total,

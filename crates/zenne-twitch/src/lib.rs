@@ -46,6 +46,11 @@ pub async fn run_twitch_bot(ctx: AppContext, games: GameHub) {
         match connect_async("wss://irc-ws.chat.twitch.tv:443").await {
             Ok((ws, _)) => {
                 let (mut write, mut read) = ws.split();
+                let _ = write
+                    .send(Message::Text(
+                        "CAP REQ :twitch.tv/tags twitch.tv/commands".to_string(),
+                    ))
+                    .await;
                 let _ = write.send(Message::Text(format!("PASS {}", pass))).await;
                 let _ = write.send(Message::Text(format!("NICK {}", nick))).await;
                 for ch in &channels {
@@ -70,28 +75,44 @@ pub async fn run_twitch_bot(ctx: AppContext, games: GameHub) {
                         let Some((channel, user, content)) = parse_privmsg(raw) else {
                             continue;
                         };
+                        if user.eq_ignore_ascii_case(&nick) {
+                            continue;
+                        }
                         let ch_hash = ch_id_hash(&channel);
 
                         if !content.starts_with(&prefix) {
                             // Check active VTV / Cadao / Chinhta / Flag / Quiz / Word-chain
-                            if let Some((true, ans)) = games.vuatiengviet.check_answer(ch_hash, &content) {
+                            if let Some((true, ans)) =
+                                games.vuatiengviet.check_answer(ch_hash, &content)
+                            {
                                 let reply = format!("@{} 🎉 Đúng rồi! Đáp án VTV: {}", user, ans);
-                                let _ = write.send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply))).await;
+                                let _ = write
+                                    .send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply)))
+                                    .await;
                                 continue;
                             }
                             if let Some((true, ans)) = games.cadao.check_answer(ch_hash, &content) {
                                 let reply = format!("@{} 🌾 Chính xác Ca Dao: {}", user, ans);
-                                let _ = write.send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply))).await;
+                                let _ = write
+                                    .send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply)))
+                                    .await;
                                 continue;
                             }
-                            if let Some((true, ans)) = games.chinhta.check_answer(ch_hash, &content) {
+                            if let Some((true, ans)) = games.chinhta.check_answer(ch_hash, &content)
+                            {
                                 let reply = format!("@{} ✍️ Chuẩn chính tả: {}", user, ans);
-                                let _ = write.send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply))).await;
+                                let _ = write
+                                    .send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply)))
+                                    .await;
                                 continue;
                             }
-                            if let Some((true, ans)) = games.flag_quiz.check_answer(ch_hash, &content) {
+                            if let Some((true, ans)) =
+                                games.flag_quiz.check_answer(ch_hash, &content)
+                            {
                                 let reply = format!("@{} 🌍 Chính xác Quốc kỳ: {}", user, ans);
-                                let _ = write.send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply))).await;
+                                let _ = write
+                                    .send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply)))
+                                    .await;
                                 continue;
                             }
                             let upper = content.trim().to_uppercase();
@@ -100,29 +121,47 @@ pub async fn run_twitch_bot(ctx: AppContext, games: GameHub) {
                                     let reply = if ok {
                                         format!("@{} ✅ Chính xác! Đáp án: {}", user, right_ans)
                                     } else {
-                                        format!("@{} ❌ Sai rồi! Đáp án đúng là: {}", user, right_ans)
+                                        format!(
+                                            "@{} ❌ Sai rồi! Đáp án đúng là: {}",
+                                            user, right_ans
+                                        )
                                     };
-                                    let _ = write.send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply))).await;
+                                    let _ = write
+                                        .send(Message::Text(format!(
+                                            "PRIVMSG #{} :{}",
+                                            channel, reply
+                                        )))
+                                        .await;
                                     continue;
                                 }
                             }
 
                             // Word-chain gameplay
-                            if let Some(mut r) = rooms.get_mut(&channel) {
+                            if let Some(r) = rooms.get_mut(&channel) {
                                 if !r.active {
                                     continue;
                                 }
                                 let word = wiki::normalize_word(&content);
-                                if word.is_empty() || !wiki::valid_chain(&r.current_word, &word, &r.lang) {
+                                if word.is_empty()
+                                    || !wiki::valid_chain(&r.current_word, &word, &r.lang)
+                                {
                                     continue;
                                 }
                                 if r.used.contains(&word.to_lowercase()) {
-                                    let _ = write.send(Message::Text(format!("PRIVMSG #{} :@{} 🔁 Từ '{}' đã dùng rồi!", channel, user, word))).await;
+                                    let _ = write
+                                        .send(Message::Text(format!(
+                                            "PRIVMSG #{} :@{} 🔁 Từ '{}' đã dùng rồi!",
+                                            channel, user, word
+                                        )))
+                                        .await;
                                     continue;
                                 }
                                 let lang = r.lang.clone();
                                 drop(r);
-                                let (ok, _) = wiki::check_word(&ctx.http, &ctx.db, &ctx.cache, 0, &lang, &word).await;
+                                let (ok, _) = wiki::check_word(
+                                    &ctx.http, &ctx.db, &ctx.cache, 0, &lang, &word,
+                                )
+                                .await;
                                 if ok {
                                     if let Some(mut r) = rooms.get_mut(&channel) {
                                         r.used.insert(word.to_lowercase());
@@ -131,11 +170,18 @@ pub async fn run_twitch_bot(ctx: AppContext, games: GameHub) {
                                         *r.scores.entry(user.clone()).or_insert(0) += 1;
                                         let next_syl = r.last_syl.clone();
                                         let solo = r.solo;
-                                        let used_vec: Vec<String> = r.used.iter().cloned().collect();
+                                        let used_vec: Vec<String> =
+                                            r.used.iter().cloned().collect();
                                         drop(r);
-                                        let mut reply = format!("@{} ✅ '{}' (+1đ) | Nối tiếp: '{}'", user, word, next_syl);
+                                        let mut reply = format!(
+                                            "@{} ✅ '{}' (+1đ) | Nối tiếp: '{}'",
+                                            user, word, next_syl
+                                        );
                                         if solo {
-                                            let sugs = wiki::find_continuations(&ctx.db, 0, &lang, &next_syl, &used_vec, 5).await;
+                                            let sugs = wiki::find_continuations(
+                                                &ctx.db, 0, &lang, &next_syl, &used_vec, 5,
+                                            )
+                                            .await;
                                             if let Some(bw) = sugs.first() {
                                                 if let Some(mut r) = rooms.get_mut(&channel) {
                                                     r.used.insert(bw.to_lowercase());
@@ -145,7 +191,12 @@ pub async fn run_twitch_bot(ctx: AppContext, games: GameHub) {
                                                 }
                                             }
                                         }
-                                        let _ = write.send(Message::Text(format!("PRIVMSG #{} :{}", channel, reply))).await;
+                                        let _ = write
+                                            .send(Message::Text(format!(
+                                                "PRIVMSG #{} :{}",
+                                                channel, reply
+                                            )))
+                                            .await;
                                     }
                                 }
                             }
@@ -188,6 +239,44 @@ pub async fn run_twitch_bot(ctx: AppContext, games: GameHub) {
                                     let s: Vec<String> = r.scores.iter().map(|(u, p)| format!("{}: {}", u, p)).collect();
                                     if s.is_empty() { "📊 Chưa ai ghi điểm.".to_string() } else { format!("📊 Điểm: {}", s.join(" | ")) }
                                 } else { "❌ Chưa có ván nối từ nào.".to_string() }
+                            }
+                            "top" | "bxh" | "leaderboard" => {
+                                let rows = ctx.db.lb_get_top(0, 5).await;
+                                if rows.is_empty() {
+                                    "🏆 Chưa có bảng xếp hạng.".to_string()
+                                } else {
+                                    let s: Vec<String> = rows.iter().enumerate().map(|(i, r)| format!("{}. ID {}: {} từ", i + 1, r.user_id, r.total_words)).collect();
+                                    format!("🏆 Top: {}", s.join(" | "))
+                                }
+                            }
+                            "taophong" | "create" => {
+                                let rid = format!("{:06X}", ch_hash & 0xFFFFFF);
+                                let name = if arg.is_empty() { format!("Phòng Twitch {}", user) } else { arg.to_string() };
+                                let url = format!("{}/pub/play/{}", ctx.config.web_base_url.trim_end_matches('/'), rid);
+                                ctx.db.create_public_room(&zenne_core::db::PublicRoomRow {
+                                    room_id: rid.clone(),
+                                    name: name.clone(),
+                                    platform: "twitch".to_string(),
+                                    host_id: user.clone(),
+                                    host_name: user.clone(),
+                                    lang: "vi".to_string(),
+                                    max_players: 0,
+                                    current_players: 1,
+                                    join_token: None,
+                                    web_url: Some(url.clone()),
+                                    tele_url: None,
+                                    status: "waiting".to_string(),
+                                }).await;
+                                format!("🌐 Tạo phòng '{}' [{}]: {}", name, rid, url)
+                            }
+                            "phong" | "rooms" => {
+                                let list = ctx.db.get_public_rooms().await;
+                                if list.is_empty() {
+                                    "🌐 Hiện chưa có phòng công khai nào.".to_string()
+                                } else {
+                                    let s: Vec<String> = list.iter().take(5).map(|r| format!("[{}] {}", r.room_id, r.name)).collect();
+                                    format!("🌐 Phòng đang mở: {}", s.join(" | "))
+                                }
                             }
                             "tratu" | "check" if !arg.is_empty() => {
                                 let (ok, _) = wiki::check_word(&ctx.http, &ctx.db, &ctx.cache, 0, "vi", arg).await;

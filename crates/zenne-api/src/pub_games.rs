@@ -17,23 +17,12 @@ pub struct TttSession {
     pub streak: i64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct MsSession {
     pub mines: Option<HashSet<usize>>,
     pub revealed: HashSet<usize>,
     pub over: bool,
     pub start_time: Option<Instant>,
-}
-
-impl Default for MsSession {
-    fn default() -> Self {
-        Self {
-            mines: None,
-            revealed: HashSet::new(),
-            over: false,
-            start_time: None,
-        }
-    }
 }
 
 pub type TttSessionsMap = Arc<DashMap<i64, TttSession>>;
@@ -320,7 +309,9 @@ pub async fn handle_ms(
             .unwrap_or(0.0);
         let score = (1000 - (elapsed * 3.0) as i64).max(0);
         drop(sess);
-        ctx.db.game_submit_score("minesweeper", user_id, score).await;
+        ctx.db
+            .game_submit_score("minesweeper", user_id, score)
+            .await;
         return Ok(json!({
             "result": "won",
             "revealed": newly,
@@ -332,15 +323,59 @@ pub async fn handle_ms(
     Ok(json!({ "result": "playing", "revealed": newly }))
 }
 
+pub const ALLOWED_GAMES: &[&str] = &[
+    "2048",
+    "snake",
+    "minesweeper",
+    "tictactoe",
+    "afk",
+    "wordle",
+    "trivia",
+    "math",
+    "scramble",
+    "noitu",
+    "taixiu",
+    "baucua",
+    "trieuphu",
+    "typing",
+    "memory",
+    "flappy",
+    "tetris",
+];
+
 pub fn sanity_check_score(game: &str, score: i64) -> bool {
     if score < 0 {
         return false;
     }
-    match game {
+    let g = game.trim().to_lowercase();
+    if !ALLOWED_GAMES.contains(&g.as_str()) {
+        return false;
+    }
+    match g.as_str() {
         "2048" => score <= 500_000,
         "snake" => score <= 10_000,
         "minesweeper" => score <= 1_000,
         "tictactoe" => score <= 1_000,
+        "afk" => score <= 86_400,
         _ => score <= 1_000_000,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ttt_minimax_and_sanity_checks() {
+        let mut board = [None; 9];
+        board[0] = Some('X');
+        board[1] = Some('X');
+        // AI ('O') must block index 2
+        assert_eq!(ttt_ai_move(&board), Some(2));
+        assert!(sanity_check_score("2048", 2048));
+        assert!(!sanity_check_score("2048", 999_999));
+        assert!(!sanity_check_score("snake", -1));
+        assert!(sanity_check_score("  2048 ", 2048));
+        assert!(!sanity_check_score("unknown_game", 10));
     }
 }

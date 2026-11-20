@@ -77,11 +77,11 @@ async fn main() -> anyhow::Result<()> {
                     info!("🛑 Đã nhận tín hiệu Ctrl+C, đang dừng toàn bộ hệ thống bot...");
                 }
                 _ = h_api => {}
-                _ = h_dc => {}
-                _ = h_tg => {}
-                _ = h_tw => {}
-                _ = h_rv => {}
             }
+            h_dc.abort();
+            h_tg.abort();
+            h_tw.abort();
+            h_rv.abort();
         }
     }
 

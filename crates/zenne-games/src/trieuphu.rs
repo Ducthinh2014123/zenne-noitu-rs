@@ -54,7 +54,12 @@ const QUESTIONS: &[TrieuPhuQuestion] = &[
     },
     TrieuPhuQuestion {
         question: "Đại dương nào lớn nhất Trái Đất?",
-        options: ["Đại Tây Dương", "Ấn Độ Dương", "Bắc Băng Dương", "Thái Bình Dương"],
+        options: [
+            "Đại Tây Dương",
+            "Ấn Độ Dương",
+            "Bắc Băng Dương",
+            "Thái Bình Dương",
+        ],
         correct: 3,
     },
     TrieuPhuQuestion {
@@ -64,15 +69,57 @@ const QUESTIONS: &[TrieuPhuQuestion] = &[
     },
     TrieuPhuQuestion {
         question: "Ai là người đầu tiên đặt chân lên Mặt Trăng năm 1969?",
-        options: ["Yuri Gagarin", "Neil Armstrong", "Buzz Aldrin", "Michael Collins"],
+        options: [
+            "Yuri Gagarin",
+            "Neil Armstrong",
+            "Buzz Aldrin",
+            "Michael Collins",
+        ],
         correct: 1,
+    },
+    TrieuPhuQuestion {
+        question: "Con sông nào chảy qua thủ đô Hà Nội?",
+        options: ["Sông Mekong", "Sông Hồng", "Sông Hương", "Sông Đồng Nai"],
+        correct: 1,
+    },
+    TrieuPhuQuestion {
+        question: "Ngôn ngữ lập trình Rust phát hành phiên bản 1.0 ổn định vào năm nào?",
+        options: ["2012", "2015", "2018", "2020"],
+        correct: 1,
+    },
+    TrieuPhuQuestion {
+        question: "Hành tinh nào lớn nhất trong Hệ Mặt Trời?",
+        options: ["Sao Thổ", "Sao Mộc", "Sao Thiên Vương", "Trái Đất"],
+        correct: 1,
+    },
+    TrieuPhuQuestion {
+        question: "Vận tốc ánh sáng trong chân không xấp xỉ bao nhiêu km/s?",
+        options: ["150.000", "300.000", "450.000", "1.000.000"],
+        correct: 1,
+    },
+    TrieuPhuQuestion {
+        question: "Quốc gia nào có diện tích lớn nhất thế giới?",
+        options: ["Canada", "Trung Quốc", "Hoa Kỳ", "Nga"],
+        correct: 3,
     },
 ];
 
 pub const MONEY_LADDER: [&str; 15] = [
-    "200.000", "400.000", "600.000", "1.000.000", "2.000.000",
-    "3.000.000", "6.000.000", "10.000.000", "14.000.000", "22.000.000",
-    "30.000.000", "40.000.000", "60.000.000", "85.000.000", "150.000.000",
+    "200.000",
+    "400.000",
+    "600.000",
+    "1.000.000",
+    "2.000.000",
+    "3.000.000",
+    "6.000.000",
+    "10.000.000",
+    "14.000.000",
+    "22.000.000",
+    "30.000.000",
+    "40.000.000",
+    "60.000.000",
+    "85.000.000",
+    "150.000.000",
 ];
 
 #[derive(Clone, Default)]

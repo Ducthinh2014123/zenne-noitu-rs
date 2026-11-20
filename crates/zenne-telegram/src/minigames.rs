@@ -79,7 +79,12 @@ const TRIEUPHU_BANK: &[TrieuPhuQuestion] = &[
     },
     TrieuPhuQuestion {
         q: "Đại dương nào có diện tích lớn nhất trên Trái Đất?",
-        options: ["Đại Tây Dương", "Ấn Độ Dương", "Bắc Băng Dương", "Thái Bình Dương"],
+        options: [
+            "Đại Tây Dương",
+            "Ấn Độ Dương",
+            "Bắc Băng Dương",
+            "Thái Bình Dương",
+        ],
         correct: 3,
     },
     TrieuPhuQuestion {
@@ -89,12 +94,22 @@ const TRIEUPHU_BANK: &[TrieuPhuQuestion] = &[
     },
     TrieuPhuQuestion {
         q: "Con sông nào dài nhất Việt Nam chảy qua lãnh thổ Việt Nam (tính phần hạ lưu)?",
-        options: ["Sông Hồng", "Sông Đà", "Sông Mê Kông (Cửu Long)", "Sông Đồng Nai"],
+        options: [
+            "Sông Hồng",
+            "Sông Đà",
+            "Sông Mê Kông (Cửu Long)",
+            "Sông Đồng Nai",
+        ],
         correct: 3,
     },
     TrieuPhuQuestion {
         q: "Năm 1969, ai là người đầu tiên đặt chân lên Mặt Trăng?",
-        options: ["Yuri Gagarin", "Neil Armstrong", "Buzz Aldrin", "Michael Collins"],
+        options: [
+            "Yuri Gagarin",
+            "Neil Armstrong",
+            "Buzz Aldrin",
+            "Michael Collins",
+        ],
         correct: 1,
     },
     TrieuPhuQuestion {
@@ -153,16 +168,44 @@ const CADAO_CHOICES: &[(&str, &str, [&str; 4])] = &[
 ];
 
 const FLAG_CHOICES: &[(&str, &str, [&str; 4])] = &[
-    ("🇻🇳", "Việt Nam", ["Việt Nam", "Trung Quốc", "Thái Lan", "Lào"]),
-    ("🇯🇵", "Nhật Bản", ["Hàn Quốc", "Nhật Bản", "Đài Loan", "Singapore"]),
-    ("🇰🇷", "Hàn Quốc", ["Nhật Bản", "Triều Tiên", "Hàn Quốc", "Mông Cổ"]),
+    (
+        "🇻🇳",
+        "Việt Nam",
+        ["Việt Nam", "Trung Quốc", "Thái Lan", "Lào"],
+    ),
+    (
+        "🇯🇵",
+        "Nhật Bản",
+        ["Hàn Quốc", "Nhật Bản", "Đài Loan", "Singapore"],
+    ),
+    (
+        "🇰🇷",
+        "Hàn Quốc",
+        ["Nhật Bản", "Triều Tiên", "Hàn Quốc", "Mông Cổ"],
+    ),
     ("🇺🇸", "Hoa Kỳ (Mỹ)", ["Anh", "Hoa Kỳ (Mỹ)", "Canada", "Úc"]),
-    ("🇬🇧", "Vương quốc Anh", ["Úc", "New Zealand", "Vương quốc Anh", "Pháp"]),
+    (
+        "🇬🇧",
+        "Vương quốc Anh",
+        ["Úc", "New Zealand", "Vương quốc Anh", "Pháp"],
+    ),
     ("🇫🇷", "Pháp", ["Ý", "Pháp", "Hà Lan", "Bỉ"]),
     ("🇩🇪", "Đức", ["Bỉ", "Áo", "Đức", "Thụy Sĩ"]),
-    ("🇹🇭", "Thái Lan", ["Thái Lan", "Indonesia", "Malaysia", "Philippines"]),
-    ("🇸🇬", "Singapore", ["Malaysia", "Indonesia", "Singapore", "Brunei"]),
-    ("🇧🇷", "Brazil", ["Argentina", "Brazil", "Colombia", "Mexico"]),
+    (
+        "🇹🇭",
+        "Thái Lan",
+        ["Thái Lan", "Indonesia", "Malaysia", "Philippines"],
+    ),
+    (
+        "🇸🇬",
+        "Singapore",
+        ["Malaysia", "Indonesia", "Singapore", "Brunei"],
+    ),
+    (
+        "🇧🇷",
+        "Brazil",
+        ["Argentina", "Brazil", "Colombia", "Mexico"],
+    ),
 ];
 
 pub async fn cmd_quiz(bot: &Bot, msg: &Message, st: &TelegramState, args: &str) {
@@ -222,7 +265,6 @@ pub async fn cmd_vtv(bot: &Bot, msg: &Message, st: &TelegramState) {
         chat_id.0,
         VtvSession {
             target: sess.answer.clone(),
-            scrambled: sess.scrambled.clone(),
             started_at: std::time::Instant::now(),
         },
     );
@@ -285,8 +327,20 @@ pub async fn cmd_taixiu(bot: &Bot, msg: &Message, st: &TelegramState) {
         };
         let tbl = tbl_arc.lock().await;
         let r = taixiu::roll_taixiu();
-        let result = if r.is_tai { "tai" } else { "xiu" };
-        let result_label = if r.is_tai { "TÀI 🔴" } else { "XỈU 🔵" };
+        let result = if r.is_triple {
+            "bao"
+        } else if r.is_tai {
+            "tai"
+        } else {
+            "xiu"
+        };
+        let result_label = if r.is_triple {
+            "BÃO 💥 (Bộ ba đồng nhất)"
+        } else if r.is_tai {
+            "TÀI 🔴"
+        } else {
+            "XỈU 🔵"
+        };
         let emojis = ["⚀", "⚁", "⚂", "⚃", "⚄", "⚅"];
 
         let mut winners = Vec::new();
@@ -722,11 +776,7 @@ pub async fn handle_minigame_callback(
         let _ = bot.answer_callback_query(q.id.clone()).await;
         st.active_quiz.remove(&chat_id.0);
         let _ = bot
-            .edit_message_text(
-                chat_id,
-                msg_id,
-                "⏹️ <b>Đã dừng câu hỏi trắc nghiệm!</b>",
-            )
+            .edit_message_text(chat_id, msg_id, "⏹️ <b>Đã dừng câu hỏi trắc nghiệm!</b>")
             .parse_mode(ParseMode::Html)
             .await;
         return true;
@@ -853,7 +903,9 @@ pub async fn handle_minigame_callback(
         let idx: usize = idx_str.parse().unwrap_or(0);
         if let Some((_, ct)) = st.active_chinhta.remove(&chat_id.0) {
             let selected = if idx == 0 { &ct.opt_a } else { &ct.opt_b };
-            if selected.eq_ignore_ascii_case(&ct.correct) || selected.to_lowercase() == ct.correct.to_lowercase() {
+            if selected.eq_ignore_ascii_case(&ct.correct)
+                || selected.to_lowercase() == ct.correct.to_lowercase()
+            {
                 st.app.db.game_submit_score("chinhta", uid, 15).await;
                 let text = format!(
                     "🎉 <b>HOÀN TOÀN CHÍNH XÁC!</b> (+15đ)\n\n✅ <b>{}</b> là cách viết chuẩn xác.\n\nGõ <code>/chinhta</code> để làm câu tiếp theo!",
@@ -934,7 +986,10 @@ pub async fn handle_minigame_callback(
             if level >= 15 {
                 drop(tp_ref);
                 st.active_trieuphu.remove(&chat_id.0);
-                st.app.db.game_submit_score("trieuphu", uid, 150_000_000).await;
+                st.app
+                    .db
+                    .game_submit_score("trieuphu", uid, 150_000_000)
+                    .await;
                 let _ = bot
                     .edit_message_text(
                         chat_id,
@@ -975,7 +1030,10 @@ pub async fn handle_minigame_callback(
             } else {
                 0
             };
-            st.app.db.game_submit_score("trieuphu", uid, safe_prize).await;
+            st.app
+                .db
+                .game_submit_score("trieuphu", uid, safe_prize)
+                .await;
             let text = format!(
                 "❌ <b>RẤT TIẾC, CÂU TRẢ LỜI KHÔNG CHÍNH XÁC!</b>\n\n✅ Đáp án đúng là: <b>{}</b>\n💰 Bạn ra về với mức thưởng an toàn: <b>{} VNĐ</b>!\nGõ <code>/trieuphu</code> để bắt đầu lại nhé!",
                 html_escape(correct_opt),
@@ -991,6 +1049,14 @@ pub async fn handle_minigame_callback(
 
     if data == "tp_5050" {
         if let Some(mut tp) = st.active_trieuphu.get_mut(&chat_id.0) {
+            if uid != tp.player_id {
+                let _ = bot
+                    .answer_callback_query(q.id.clone())
+                    .text("⛔ Chỉ người đang thi đấu mới được dùng trợ giúp!")
+                    .show_alert(true)
+                    .await;
+                return true;
+            }
             if tp.lifeline_5050 {
                 tp.lifeline_5050 = false;
                 let correct = tp.current_q.correct;
@@ -1045,6 +1111,14 @@ pub async fn handle_minigame_callback(
 
     if data == "tp_aud" {
         if let Some(mut tp) = st.active_trieuphu.get_mut(&chat_id.0) {
+            if uid != tp.player_id {
+                let _ = bot
+                    .answer_callback_query(q.id.clone())
+                    .text("⛔ Chỉ người đang thi đấu mới được dùng trợ giúp!")
+                    .show_alert(true)
+                    .await;
+                return true;
+            }
             if tp.lifeline_audience {
                 tp.lifeline_audience = false;
                 let correct = tp.current_q.correct;
@@ -1075,6 +1149,16 @@ pub async fn handle_minigame_callback(
     }
 
     if data == "tp_stop" {
+        if let Some(tp_ref) = st.active_trieuphu.get(&chat_id.0) {
+            if uid != tp_ref.player_id {
+                let _ = bot
+                    .answer_callback_query(q.id.clone())
+                    .text("⛔ Chỉ người đang thi đấu mới được dừng cuộc chơi!")
+                    .show_alert(true)
+                    .await;
+                return true;
+            }
+        }
         let _ = bot.answer_callback_query(q.id.clone()).await;
         if let Some((_, tp)) = st.active_trieuphu.remove(&chat_id.0) {
             let prize = if tp.level > 1 {
@@ -1082,6 +1166,13 @@ pub async fn handle_minigame_callback(
             } else {
                 "0"
             };
+            let prize_val: i64 = prize.replace('.', "").parse().unwrap_or(0);
+            if prize_val > 0 {
+                st.app
+                    .db
+                    .game_submit_score("trieuphu", uid, prize_val)
+                    .await;
+            }
             let text = format!(
                 "⏹️ <b>BẠN ĐÃ DỪNG CUỘC CHƠI AN TOÀN!</b>\n\n💰 Bạn bảo toàn số tiền thưởng: <b>{} VNĐ</b>!\nGõ <code>/trieuphu</code> để quay lại thi đấu!",
                 prize
