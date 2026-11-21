@@ -649,6 +649,11 @@ async fn event_handler(
             }
             let _ = noitu::handle_word_message(ctx, new_message, &data.app, &data.noitu).await;
         }
+        serenity::FullEvent::InteractionCreate {
+            interaction: serenity::Interaction::Component(comp),
+        } if comp.data.custom_id.starts_with("music_") => {
+            music::handle_music_button(ctx, comp, data).await;
+        }
         _ => {}
     }
     Ok(())

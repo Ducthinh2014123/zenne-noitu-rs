@@ -551,10 +551,14 @@ pub async fn nowplaying(ctx: Context<'_>) -> Result<(), Error> {
     let st_arc = ctx.data().music.get_state(guild_id);
     let guard = st_arc.lock().await;
     if let Some(ref track) = guard.current {
-        ctx.say(format!(
-            "🎵 Đang phát: **{}** ({})",
-            track.title, track.permalink_url
-        ))
+        ctx.send(
+            poise::CreateReply::default()
+                .content(format!(
+                    "🎵 Đang phát: **{}** ({})",
+                    track.title, track.permalink_url
+                ))
+                .components(crate::music::music_control_components()),
+        )
         .await?;
     } else if let Some(track) = guard.queue.first() {
         ctx.say(format!(
