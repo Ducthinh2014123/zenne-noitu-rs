@@ -192,7 +192,7 @@ impl TelegramState {
     pub fn web_base_url(&self) -> String {
         let base = self.app.config.web_base_url.trim().trim_end_matches('/');
         if base.is_empty() {
-            "https://zenne-noitu.vercel.app".to_string()
+            "https://zenne-noitu.me".to_string()
         } else {
             base.to_string()
         }
