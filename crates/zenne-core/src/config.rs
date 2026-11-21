@@ -118,7 +118,7 @@ impl AppConfig {
             kira_default_model: env_str("KIRA_DEFAULT_MODEL", "stealth-missingno"),
             api_key,
             api_port: env_str("API_PORT", "26035").parse().unwrap_or(26035),
-            web_base_url: env_str("WEB_BASE_URL", "https://zenne-noitu.vercel.app"),
+            web_base_url: env_str("WEB_BASE_URL", "https://zenne-noitu.me"),
             web_token_secret,
             game_session_secret,
             twitch_bot_nick: env_str("TWITCH_BOT_NICK", "zenne_noitu_bot"),
