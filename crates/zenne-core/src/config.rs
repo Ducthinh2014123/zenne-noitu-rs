@@ -133,7 +133,7 @@ impl AppConfig {
             ),
             lavalink_uri: env_str("LAVALINK_URI", "http://june.hidencloud.com:24605"),
             lavalink_password: env_str("LAVALINK_PASSWORD", "youshallnotpass"),
-            smtp_host: env_str("SMTP_HOST", "smtp.gmail.com"),
+            smtp_host: env_str("SMTP_HOST", "smtp-relay.brevo.com"),
             smtp_port: env_str("SMTP_PORT", "587").parse().unwrap_or(587),
             smtp_user: env_str("SMTP_USER", ""),
             smtp_pass: env_str("SMTP_PASS", ""),

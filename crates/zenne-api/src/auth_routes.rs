@@ -374,7 +374,7 @@ pub async fn handle_register(st: &Arc<ApiState>, body: RegisterBody) -> axum::re
                 (u.id, otp_hash.as_str(), email, exp.as_str()),
             )
             .await;
-        let _ = send_smtp_email(
+        if let Err(e) = send_smtp_email(
             &st.ctx,
             email,
             "Mã xác thực đăng ký Zenne Nối Từ",
@@ -383,7 +383,10 @@ pub async fn handle_register(st: &Arc<ApiState>, body: RegisterBody) -> axum::re
                 uname, otp
             ),
         )
-        .await;
+        .await
+        {
+            tracing::warn!("[SMTP] Failed to send register OTP to {}: {}", email, e);
+        }
         return Json(json!({
             "ok": true,
             "requires_verification": true,
@@ -591,13 +594,16 @@ pub async fn handle_register_email_resend(
             )
             .await;
     }
-    let _ = send_smtp_email(
+    if let Err(e) = send_smtp_email(
         &st.ctx,
         &u.email,
         "Gửi lại mã xác thực Zenne Nối Từ",
         &format!("Mã OTP mới của bạn là: {} (hiệu lực 10 phút)", otp),
     )
-    .await;
+    .await
+    {
+        tracing::warn!("[SMTP] Failed to resend OTP to {}: {}", u.email, e);
+    }
 
     Json(json!({ "ok": true, "expires_in": 600 })).into_response()
 }
@@ -815,7 +821,7 @@ pub async fn handle_recovery_request(
                 )
                 .await;
         }
-        let _ = send_smtp_email(
+        if let Err(e) = send_smtp_email(
             &st.ctx,
             &u.email,
             "Khôi phục mật khẩu Zenne Nối Từ",
@@ -824,7 +830,10 @@ pub async fn handle_recovery_request(
                 u.username, otp
             ),
         )
-        .await;
+        .await
+        {
+            tracing::warn!("[SMTP] Failed to send recovery OTP to {}: {}", u.email, e);
+        }
     }
     Json(json!({ "ok": true, "success": true, "expires_in": 600 })).into_response()
 }
