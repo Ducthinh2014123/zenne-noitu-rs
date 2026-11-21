@@ -181,6 +181,17 @@ impl DbManager {
             ui_lang       TEXT    DEFAULT NULL,
             created_at    TEXT    DEFAULT (datetime('now','localtime'))
         );
+        CREATE TABLE IF NOT EXISTS web_passkeys (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id       INTEGER NOT NULL,
+            credential_id TEXT UNIQUE NOT NULL,
+            public_key    TEXT NOT NULL,
+            counter       INTEGER NOT NULL DEFAULT 0,
+            transports    TEXT DEFAULT NULL,
+            rp_id         TEXT NOT NULL,
+            device_name   TEXT DEFAULT 'Passkey',
+            created_at    TEXT DEFAULT (datetime('now','localtime'))
+        );
         CREATE TABLE IF NOT EXISTS password_recovery (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id     INTEGER NOT NULL,
@@ -225,6 +236,8 @@ impl DbManager {
         CREATE INDEX IF NOT EXISTS idx_gs_game ON game_scores(game);
         CREATE INDEX IF NOT EXISTS idx_wu_email ON web_users(email);
         CREATE INDEX IF NOT EXISTS idx_wu_prov ON web_users(provider, provider_id);
+        CREATE INDEX IF NOT EXISTS idx_wp_user ON web_passkeys(user_id);
+        CREATE INDEX IF NOT EXISTS idx_wp_cred ON web_passkeys(credential_id);
         CREATE INDEX IF NOT EXISTS idx_tn_guild ON tournaments(guild_id);
         CREATE INDEX IF NOT EXISTS idx_pr_user ON password_recovery(user_id);
         CREATE INDEX IF NOT EXISTS idx_pr_hash ON password_recovery(token_hash);
