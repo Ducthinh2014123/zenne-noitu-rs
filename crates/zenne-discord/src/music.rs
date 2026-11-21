@@ -137,7 +137,12 @@ pub async fn play_next_in_guild(
                 track.requester_name
             )));
         let _ = channel_id
-            .send_message(&http, serenity::CreateMessage::new().embed(embed))
+            .send_message(
+                &http,
+                serenity::CreateMessage::new()
+                    .embed(embed)
+                    .components(music_control_components()),
+            )
             .await;
     }
 
@@ -262,11 +267,168 @@ pub async fn play_next_for_worker(
                 track.requester_name
             )));
         let _ = text_channel_id
-            .send_message(&main_http, serenity::CreateMessage::new().embed(embed))
+            .send_message(
+                &main_http,
+                serenity::CreateMessage::new()
+                    .embed(embed)
+                    .components(music_control_components()),
+            )
             .await;
     }
 
     Ok(())
+}
+
+pub fn music_control_components() -> Vec<serenity::CreateActionRow> {
+    vec![serenity::CreateActionRow::Buttons(vec![
+        serenity::CreateButton::new("music_play_pause")
+            .emoji('⏯')
+            .style(serenity::ButtonStyle::Secondary),
+        serenity::CreateButton::new("music_skip")
+            .emoji('⏭')
+            .style(serenity::ButtonStyle::Secondary),
+        serenity::CreateButton::new("music_stop")
+            .emoji('⏹')
+            .style(serenity::ButtonStyle::Danger),
+        serenity::CreateButton::new("music_loop")
+            .emoji('🔁')
+            .style(serenity::ButtonStyle::Secondary),
+    ])]
+}
+
+async fn reply_music_eph(
+    ctx: &serenity::Context,
+    comp: &serenity::ComponentInteraction,
+    msg: &str,
+) {
+    let _ = comp
+        .create_response(
+            &ctx.http,
+            serenity::CreateInteractionResponse::Message(
+                serenity::CreateInteractionResponseMessage::new()
+                    .content(msg)
+                    .ephemeral(true),
+            ),
+        )
+        .await;
+}
+
+pub async fn handle_music_button(
+    ctx: &serenity::Context,
+    comp: &serenity::ComponentInteraction,
+    data: &Data,
+) {
+    let Some(guild_id) = comp.guild_id else {
+        reply_music_eph(ctx, comp, "❌ Nút điều khiển chỉ dùng trong server!").await;
+        return;
+    };
+    let user_vc = ctx.cache.guild(guild_id).and_then(|g| {
+        g.voice_states
+            .get(&comp.user.id)
+            .and_then(|vs| vs.channel_id)
+    });
+    let Some(vc_id) = user_vc else {
+        reply_music_eph(
+            ctx,
+            comp,
+            "❌ Bạn cần ở trong cùng kênh thoại với bot để bấm nút!",
+        )
+        .await;
+        return;
+    };
+
+    let mp = &data.multiplay;
+    let target: Option<(
+        Option<usize>,
+        Arc<tokio::sync::Mutex<zenne_music::GuildMusicState>>,
+    )> = if mp.enabled && mp.ready_worker_count() > 0 {
+        mp.get_session_worker(guild_id.get(), vc_id.get())
+            .and_then(|wid| {
+                mp.get_worker(wid)
+                    .map(|slot| (Some(wid), slot.get_guild_state(guild_id.get())))
+            })
+    } else {
+        Some((None, data.music.get_state(guild_id.get())))
+    };
+
+    let Some((worker_opt, st_arc)) = target else {
+        reply_music_eph(ctx, comp, "❌ Bạn đang ở kênh thoại khác kênh của bot!").await;
+        return;
+    };
+
+    match comp.data.custom_id.as_str() {
+        "music_play_pause" => {
+            let st = st_arc.lock().await;
+            if let Some(ref handle) = st.current_handle {
+                if let Ok(info) = handle.get_info().await {
+                    if info.playing == songbird::tracks::PlayMode::Pause {
+                        let _ = handle.play();
+                        reply_music_eph(ctx, comp, "▶️ Đã tiếp tục phát nhạc!").await;
+                    } else {
+                        let _ = handle.pause();
+                        reply_music_eph(ctx, comp, "⏸️ Đã tạm dừng phát nhạc!").await;
+                    }
+                    return;
+                }
+            }
+            reply_music_eph(ctx, comp, "⚠️ Không có bài hát nào đang phát!").await;
+        }
+        "music_skip" => {
+            let st = st_arc.lock().await;
+            if let Some(ref handle) = st.current_handle {
+                let _ = handle.stop();
+                reply_music_eph(ctx, comp, "⏭️ Đã chuyển sang bài hát tiếp theo!").await;
+            } else {
+                reply_music_eph(ctx, comp, "⚠️ Không có bài hát nào để bỏ qua!").await;
+            }
+        }
+        "music_stop" => {
+            {
+                let mut st = st_arc.lock().await;
+                st.queue.clear();
+                st.current = None;
+                if let Some(h) = st.current_handle.take() {
+                    let _ = h.stop();
+                }
+            }
+            if let Some(wid) = worker_opt {
+                if let Some(slot) = mp.get_worker(wid) {
+                    if let Some(sb) = slot.songbird.lock().await.clone() {
+                        let _ = sb.remove(guild_id).await;
+                    }
+                }
+                mp.release_session(guild_id.get(), vc_id.get()).await;
+                reply_music_eph(
+                    ctx,
+                    comp,
+                    "⏹️ Đã dừng phát nhạc, xóa hàng đợi và rời kênh thoại!",
+                )
+                .await;
+            } else {
+                if let Some(manager) = songbird::get(ctx).await {
+                    let _ = manager.remove(guild_id).await;
+                }
+                MusicManager::cleanup_guild_audio(guild_id.get()).await;
+                reply_music_eph(
+                    ctx,
+                    comp,
+                    "⏹️ Đã dừng phát nhạc, xóa hàng đợi và rời kênh thoại!",
+                )
+                .await;
+            }
+        }
+        "music_loop" => {
+            let mut st = st_arc.lock().await;
+            st.loop_mode = (st.loop_mode + 1) % 3;
+            let msg = match st.loop_mode {
+                1 => "🔂 Đã bật chế độ: **Lặp lại bài hiện tại**",
+                2 => "🔁 Đã bật chế độ: **Lặp lại toàn bộ hàng đợi**",
+                _ => "➡️ Đã **tắt** chế độ lặp lại",
+            };
+            reply_music_eph(ctx, comp, msg).await;
+        }
+        _ => {}
+    }
 }
 
 fn user_voice_channel(ctx: &Context<'_>) -> Option<serenity::ChannelId> {
@@ -356,12 +518,12 @@ pub async fn play(
             );
         }
 
-        let track = match mp
+        let (playlist_name, tracks) = match mp
             .audio
-            .resolve_soundcloud_track(q, MusicManager::is_url(q), &ctx.author().name)
+            .resolve_soundcloud_tracks(q, MusicManager::is_url(q), &ctx.author().name)
             .await
         {
-            Ok(t) => t,
+            Ok(res) => res,
             Err(e) => {
                 if is_new_join {
                     if let Some(sb) = slot.songbird.lock().await.clone() {
@@ -374,12 +536,15 @@ pub async fn play(
             }
         };
 
+        let first_track = tracks[0].clone();
+        let added_count = tracks.len();
         let state_arc = slot.get_guild_state(guild_id.get());
         let (should_start, queue_pos, volume) = {
             let mut st = state_arc.lock().await;
             let idle = st.current.is_none();
-            st.queue.push(track.clone());
-            (idle, st.queue.len(), st.volume)
+            let first_pos = st.queue.len() + 1;
+            st.queue.extend(tracks);
+            (idle, first_pos, st.volume)
         };
 
         if should_start {
@@ -406,12 +571,15 @@ pub async fn play(
 
             let mut embed = serenity::CreateEmbed::new()
                 .title(format!("🎵 Đang Phát Nhạc (Zenne-Music {})", worker_id))
-                .description(format!("**[{}]({})**", track.title, track.permalink_url))
+                .description(format!(
+                    "**[{}]({})**",
+                    first_track.title, first_track.permalink_url
+                ))
                 .color(SOUNDCLOUD_COLOR)
-                .field("👤 Nghệ sĩ", &track.author, true)
+                .field("👤 Nghệ sĩ", &first_track.author, true)
                 .field(
                     "⏱️ Thời lượng",
-                    MusicManager::format_ms(track.duration_ms),
+                    MusicManager::format_ms(first_track.duration_ms),
                     true,
                 )
                 .field("🔊 Âm lượng", format!("{}%", (volume * 100.0) as u32), true)
@@ -419,9 +587,39 @@ pub async fn play(
                     "Yêu cầu bởi: {} • Hỗ trợ độc quyền SoundCloud",
                     ctx.author().name
                 )));
-            if let Some(ref art) = track.artwork {
+            if added_count > 1 {
+                embed = embed.field(
+                    "📜 Playlist",
+                    format!(
+                        "{} (+{} bài vào hàng đợi)",
+                        playlist_name.as_deref().unwrap_or("SoundCloud Playlist"),
+                        added_count - 1
+                    ),
+                    false,
+                );
+            }
+            if let Some(ref art) = first_track.artwork {
                 embed = embed.thumbnail(art);
             }
+            ctx.send(
+                poise::CreateReply::default()
+                    .embed(embed)
+                    .components(music_control_components()),
+            )
+            .await?;
+        } else if added_count > 1 {
+            let embed = serenity::CreateEmbed::new()
+                .title(format!(
+                    "📜 Đã Thêm Playlist Vào Hàng Đợi (Zenne-Music {})",
+                    worker_id
+                ))
+                .description(format!(
+                    "Đã thêm **{}** bài hát từ playlist **{}** vào hàng đợi (bắt đầu từ vị trí #{}).",
+                    added_count,
+                    playlist_name.as_deref().unwrap_or("SoundCloud Playlist"),
+                    queue_pos
+                ))
+                .color(SOUNDCLOUD_COLOR);
             ctx.send(poise::CreateReply::default().embed(embed)).await?;
         } else {
             let embed = serenity::CreateEmbed::new()
@@ -429,12 +627,15 @@ pub async fn play(
                     "📥 Đã Thêm Vào Hàng Đợi (Zenne-Music {})",
                     worker_id
                 ))
-                .description(format!("**[{}]({})**", track.title, track.permalink_url))
+                .description(format!(
+                    "**[{}]({})**",
+                    first_track.title, first_track.permalink_url
+                ))
                 .color(SOUNDCLOUD_COLOR)
-                .field("👤 Nghệ sĩ", &track.author, true)
+                .field("👤 Nghệ sĩ", &first_track.author, true)
                 .field(
                     "⏱️ Thời lượng",
-                    MusicManager::format_ms(track.duration_ms),
+                    MusicManager::format_ms(first_track.duration_ms),
                     true,
                 )
                 .field("🔢 Vị trí", format!("#{}", queue_pos), true);
@@ -461,25 +662,28 @@ pub async fn play(
         );
     }
 
-    let track = match ctx
+    let (playlist_name, tracks) = match ctx
         .data()
         .music
-        .resolve_soundcloud_track(q, MusicManager::is_url(q), &ctx.author().name)
+        .resolve_soundcloud_tracks(q, MusicManager::is_url(q), &ctx.author().name)
         .await
     {
-        Ok(t) => t,
+        Ok(res) => res,
         Err(e) => {
             ctx.say(format!("⚠️ {}", e)).await?;
             return Ok(());
         }
     };
 
+    let first_track = tracks[0].clone();
+    let added_count = tracks.len();
     let state_arc = ctx.data().music.get_state(guild_id.get());
     let (should_start, queue_pos, volume) = {
         let mut st = state_arc.lock().await;
         let idle = st.current.is_none();
-        st.queue.push(track.clone());
-        (idle, st.queue.len(), st.volume)
+        let first_pos = st.queue.len() + 1;
+        st.queue.extend(tracks);
+        (idle, first_pos, st.volume)
     };
 
     if should_start {
@@ -500,12 +704,15 @@ pub async fn play(
 
         let mut embed = serenity::CreateEmbed::new()
             .title("🎵 Đang Phát Nhạc (SoundCloud)")
-            .description(format!("**[{}]({})**", track.title, track.permalink_url))
+            .description(format!(
+                "**[{}]({})**",
+                first_track.title, first_track.permalink_url
+            ))
             .color(SOUNDCLOUD_COLOR)
-            .field("👤 Nghệ sĩ", &track.author, true)
+            .field("👤 Nghệ sĩ", &first_track.author, true)
             .field(
                 "⏱️ Thời lượng",
-                MusicManager::format_ms(track.duration_ms),
+                MusicManager::format_ms(first_track.duration_ms),
                 true,
             )
             .field("🔊 Âm lượng", format!("{}%", (volume * 100.0) as u32), true)
@@ -513,19 +720,49 @@ pub async fn play(
                 "Yêu cầu bởi: {} • Hỗ trợ độc quyền SoundCloud",
                 ctx.author().name
             )));
-        if let Some(ref art) = track.artwork {
+        if added_count > 1 {
+            embed = embed.field(
+                "📜 Playlist",
+                format!(
+                    "{} (+{} bài vào hàng đợi)",
+                    playlist_name.as_deref().unwrap_or("SoundCloud Playlist"),
+                    added_count - 1
+                ),
+                false,
+            );
+        }
+        if let Some(ref art) = first_track.artwork {
             embed = embed.thumbnail(art);
         }
+        ctx.send(
+            poise::CreateReply::default()
+                .embed(embed)
+                .components(music_control_components()),
+        )
+        .await?;
+    } else if added_count > 1 {
+        let embed = serenity::CreateEmbed::new()
+            .title("📜 Đã Thêm Playlist Vào Hàng Đợi (SoundCloud)")
+            .description(format!(
+                "Đã thêm **{}** bài hát từ playlist **{}** vào hàng đợi (bắt đầu từ vị trí #{}).",
+                added_count,
+                playlist_name.as_deref().unwrap_or("SoundCloud Playlist"),
+                queue_pos
+            ))
+            .color(SOUNDCLOUD_COLOR);
         ctx.send(poise::CreateReply::default().embed(embed)).await?;
     } else {
         let embed = serenity::CreateEmbed::new()
             .title("📥 Đã Thêm Vào Hàng Đợi (SoundCloud)")
-            .description(format!("**[{}]({})**", track.title, track.permalink_url))
+            .description(format!(
+                "**[{}]({})**",
+                first_track.title, first_track.permalink_url
+            ))
             .color(SOUNDCLOUD_COLOR)
-            .field("👤 Nghệ sĩ", &track.author, true)
+            .field("👤 Nghệ sĩ", &first_track.author, true)
             .field(
                 "⏱️ Thời lượng",
-                MusicManager::format_ms(track.duration_ms),
+                MusicManager::format_ms(first_track.duration_ms),
                 true,
             )
             .field("🔢 Vị trí", format!("#{}", queue_pos), true);

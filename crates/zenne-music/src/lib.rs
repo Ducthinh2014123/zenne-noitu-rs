@@ -160,15 +160,78 @@ impl MusicManager {
         }
     }
 
-    pub async fn resolve_soundcloud_track(
+    async fn resolve_track_stream(
+        &self,
+        track_data: &serde_json::Value,
+        cid: &mut String,
+        fallback_url: &str,
+        requester_name: &str,
+    ) -> Result<SoundcloudTrack, String> {
+        let transcodings = track_data["media"]["transcodings"]
+            .as_array()
+            .ok_or_else(|| "Bài hát không có luồng âm thanh khả dụng.".to_string())?;
+
+        let mut stream_url = None;
+        for tc in transcodings {
+            let Some(tc_url) = tc["url"].as_str() else {
+                continue;
+            };
+            let sep = if tc_url.contains('?') { '&' } else { '?' };
+            let req_url = format!("{}{}client_id={}", tc_url, sep, cid);
+            if let Ok(mut r) = self.http.get(&req_url).send().await {
+                if r.status().as_u16() == 401 || r.status().as_u16() == 403 {
+                    let fresh_cid = self.get_soundcloud_client_id(true).await;
+                    if !fresh_cid.is_empty() {
+                        *cid = fresh_cid;
+                        let retry_url = format!("{}{}client_id={}", tc_url, sep, cid);
+                        if let Ok(r2) = self.http.get(&retry_url).send().await {
+                            r = r2;
+                        }
+                    }
+                }
+                if r.status().is_success() {
+                    if let Ok(j) = r.json::<serde_json::Value>().await {
+                        if let Some(u) = j["url"].as_str() {
+                            stream_url = Some(u.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let stream_url =
+            stream_url.ok_or_else(|| "Không thể giải mã stream_url từ SoundCloud.".to_string())?;
+
+        Ok(SoundcloudTrack {
+            title: track_data["title"]
+                .as_str()
+                .unwrap_or("SoundCloud Track")
+                .to_string(),
+            author: track_data["user"]["username"]
+                .as_str()
+                .unwrap_or("SoundCloud Artist")
+                .to_string(),
+            permalink_url: track_data["permalink_url"]
+                .as_str()
+                .unwrap_or(fallback_url)
+                .to_string(),
+            duration_ms: track_data["duration"].as_u64().unwrap_or(0),
+            artwork: track_data["artwork_url"].as_str().map(|s| s.to_string()),
+            stream_url,
+            requester_name: requester_name.to_string(),
+        })
+    }
+
+    pub async fn resolve_soundcloud_tracks(
         &self,
         query: &str,
         is_url_flag: bool,
         requester_name: &str,
-    ) -> Result<SoundcloudTrack, String> {
+    ) -> Result<(Option<String>, Vec<SoundcloudTrack>), String> {
         let cleaned = Self::clean_query(query);
         let mut cid = self.get_soundcloud_client_id(false).await;
-        let track_data: serde_json::Value = if is_url_flag {
+        if is_url_flag {
             // Mở rộng link rút gọn (on.soundcloud.com) & bỏ query tracking (?si=..., ?ref=...)
             let mut target_url = cleaned.clone();
             if let Ok(parsed) = Url::parse(&cleaned) {
@@ -205,27 +268,79 @@ impl MusicManager {
             if !res.status().is_success() {
                 return Err(format!("SoundCloud API trả về HTTP {}", res.status()));
             }
-            let mut json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+            let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
             if json["kind"].as_str() == Some("playlist") {
-                if let Some(first_id) = json["tracks"]
+                let playlist_title = json["title"].as_str().map(|s| s.to_string());
+                let raw_tracks = json["tracks"]
                     .as_array()
-                    .and_then(|arr| arr.first())
-                    .and_then(|t| t["id"].as_u64())
-                {
-                    let tr_url = format!(
-                        "https://api-v2.soundcloud.com/tracks/{}?client_id={}",
-                        first_id, cid
-                    );
-                    if let Ok(tr_res) = self.http.get(&tr_url).send().await {
-                        if tr_res.status().is_success() {
-                            if let Ok(tr_json) = tr_res.json::<serde_json::Value>().await {
-                                json = tr_json;
+                    .ok_or_else(|| "Playlist SoundCloud trống.".to_string())?;
+
+                let mut full_items: Vec<serde_json::Value> = Vec::new();
+                let mut stub_ids: Vec<u64> = Vec::new();
+                for item in raw_tracks.iter().take(50) {
+                    if item["media"]["transcodings"].as_array().is_some() {
+                        full_items.push(item.clone());
+                    } else if let Some(id) = item["id"].as_u64() {
+                        stub_ids.push(id);
+                    }
+                }
+
+                if !stub_ids.is_empty() {
+                    for chunk in stub_ids.chunks(50) {
+                        let ids_param = chunk
+                            .iter()
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let mut tr_res = self
+                            .http
+                            .get("https://api-v2.soundcloud.com/tracks")
+                            .query(&[("ids", ids_param.as_str()), ("client_id", cid.as_str())])
+                            .send()
+                            .await;
+                        if let Ok(ref r) = tr_res {
+                            if matches!(r.status().as_u16(), 401 | 403) {
+                                cid = self.get_soundcloud_client_id(true).await;
+                                tr_res = self
+                                    .http
+                                    .get("https://api-v2.soundcloud.com/tracks")
+                                    .query(&[
+                                        ("ids", ids_param.as_str()),
+                                        ("client_id", cid.as_str()),
+                                    ])
+                                    .send()
+                                    .await;
+                            }
+                        }
+                        if let Ok(r) = tr_res {
+                            if r.status().is_success() {
+                                if let Ok(arr) = r.json::<Vec<serde_json::Value>>().await {
+                                    full_items.extend(arr);
+                                }
                             }
                         }
                     }
                 }
+
+                let mut resolved = Vec::new();
+                for item in &full_items {
+                    if let Ok(t) = self
+                        .resolve_track_stream(item, &mut cid, &target_url, requester_name)
+                        .await
+                    {
+                        resolved.push(t);
+                    }
+                }
+                if resolved.is_empty() {
+                    return Err("Không thể tải bài hát nào trong playlist SoundCloud.".to_string());
+                }
+                return Ok((playlist_title, resolved));
             }
-            json
+
+            let t = self
+                .resolve_track_stream(&json, &mut cid, &target_url, requester_name)
+                .await?;
+            Ok((None, vec![t]))
         } else {
             let mut res = self
                 .http
@@ -256,7 +371,7 @@ impl MusicManager {
                 return Err(format!("SoundCloud Search API lỗi HTTP {}", res.status()));
             }
             let body: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-            body["collection"]
+            let track_data = body["collection"]
                 .as_array()
                 .and_then(|arr| arr.first().cloned())
                 .ok_or_else(|| {
@@ -264,64 +379,27 @@ impl MusicManager {
                         "Không tìm thấy bài hát nào trên SoundCloud cho: `{}`",
                         query
                     )
-                })?
-        };
-
-        let transcodings = track_data["media"]["transcodings"]
-            .as_array()
-            .ok_or_else(|| "Bài hát không có luồng âm thanh khả dụng.".to_string())?;
-
-        let mut stream_url = None;
-        let mut cur_cid = cid;
-        for tc in transcodings {
-            let Some(tc_url) = tc["url"].as_str() else {
-                continue;
-            };
-            let sep = if tc_url.contains('?') { '&' } else { '?' };
-            let req_url = format!("{}{}client_id={}", tc_url, sep, cur_cid);
-            if let Ok(mut r) = self.http.get(&req_url).send().await {
-                if r.status().as_u16() == 401 || r.status().as_u16() == 403 {
-                    let fresh_cid = self.get_soundcloud_client_id(true).await;
-                    if !fresh_cid.is_empty() {
-                        cur_cid = fresh_cid;
-                        let retry_url = format!("{}{}client_id={}", tc_url, sep, cur_cid);
-                        if let Ok(r2) = self.http.get(&retry_url).send().await {
-                            r = r2;
-                        }
-                    }
-                }
-                if r.status().is_success() {
-                    if let Ok(j) = r.json::<serde_json::Value>().await {
-                        if let Some(u) = j["url"].as_str() {
-                            stream_url = Some(u.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
+                })?;
+            let t = self
+                .resolve_track_stream(&track_data, &mut cid, query, requester_name)
+                .await?;
+            Ok((None, vec![t]))
         }
+    }
 
-        let stream_url =
-            stream_url.ok_or_else(|| "Không thể giải mã stream_url từ SoundCloud.".to_string())?;
-
-        Ok(SoundcloudTrack {
-            title: track_data["title"]
-                .as_str()
-                .unwrap_or("SoundCloud Track")
-                .to_string(),
-            author: track_data["user"]["username"]
-                .as_str()
-                .unwrap_or("SoundCloud Artist")
-                .to_string(),
-            permalink_url: track_data["permalink_url"]
-                .as_str()
-                .unwrap_or(query)
-                .to_string(),
-            duration_ms: track_data["duration"].as_u64().unwrap_or(0),
-            artwork: track_data["artwork_url"].as_str().map(|s| s.to_string()),
-            stream_url,
-            requester_name: requester_name.to_string(),
-        })
+    pub async fn resolve_soundcloud_track(
+        &self,
+        query: &str,
+        is_url_flag: bool,
+        requester_name: &str,
+    ) -> Result<SoundcloudTrack, String> {
+        let (_pl, tracks) = self
+            .resolve_soundcloud_tracks(query, is_url_flag, requester_name)
+            .await?;
+        tracks
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Không tìm thấy bài hát SoundCloud.".to_string())
     }
 
     /// Tải và ghép init.mp4 + các phân đoạn .m4s (hoặc mp3) thành file cục bộ
