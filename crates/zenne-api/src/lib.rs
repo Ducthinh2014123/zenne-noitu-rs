@@ -114,6 +114,16 @@ pub fn build_router(ctx: AppContext) -> Router {
         .route("/pub/account/setup-2fa", post(ah_pub_account_setup_2fa))
         .route("/pub/account/enable-2fa", post(ah_pub_account_enable_2fa))
         .route("/pub/account/disable-2fa", post(ah_pub_account_disable_2fa))
+        .route(
+            "/pub/account/passkeys",
+            get(ah_pub_account_passkeys).post(ah_pub_account_passkey_add),
+        )
+        .route(
+            "/pub/account/passkeys/delete",
+            post(ah_pub_account_passkey_delete),
+        )
+        .route("/pub/auth/passkey/lookup", post(ah_auth_passkey_lookup))
+        .route("/pub/auth/passkey/counter", post(ah_auth_passkey_counter))
         .route("/pub/auth/recovery/request", post(ah_recovery_request))
         .route(
             "/pub/auth/recovery/email/verify",
@@ -1349,4 +1359,199 @@ async fn ah_recovery_reset_password(
     Json(body): Json<auth_routes::RecoveryResetBody>,
 ) -> impl IntoResponse {
     auth_routes::handle_recovery_reset_password(&st, body).await
+}
+
+#[derive(Deserialize)]
+struct PasskeysQuery {
+    user_id: Option<i64>,
+}
+
+async fn ah_pub_account_passkeys(
+    headers: HeaderMap,
+    State(st): State<Arc<ApiState>>,
+    Query(q): Query<PasskeysQuery>,
+) -> impl IntoResponse {
+    let Some((uid, _)) = resolve_account_uid(&headers, &st, q.user_id).await else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    };
+    let Ok(conn) = st.ctx.db.conn() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "DB error"}))).into_response();
+    };
+    let mut passkeys = Vec::new();
+    if let Ok(mut rows) = conn
+        .query(
+            "SELECT id, credential_id, rp_id, device_name, created_at FROM web_passkeys WHERE user_id = ?1 ORDER BY id DESC",
+            [uid],
+        )
+        .await
+    {
+        while let Ok(Some(r)) = rows.next().await {
+            passkeys.push(json!({
+                "id": r.get::<i64>(0).unwrap_or(0),
+                "credential_id": r.get::<String>(1).unwrap_or_default(),
+                "rp_id": r.get::<String>(2).unwrap_or_default(),
+                "device_name": r.get::<String>(3).unwrap_or_else(|_| "Passkey".to_string()),
+                "created_at": r.get::<String>(4).unwrap_or_default(),
+            }));
+        }
+    }
+    Json(json!({ "passkeys": passkeys })).into_response()
+}
+
+#[derive(Deserialize)]
+struct AddPasskeyBody {
+    user_id: Option<i64>,
+    credential_id: String,
+    public_key: String,
+    counter: Option<i64>,
+    transports: Option<String>,
+    rp_id: String,
+    device_name: Option<String>,
+}
+
+async fn ah_pub_account_passkey_add(
+    headers: HeaderMap,
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<AddPasskeyBody>,
+) -> impl IntoResponse {
+    let Some((uid, _)) = resolve_account_uid(&headers, &st, body.user_id).await else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    };
+    let cred_id = body.credential_id.trim();
+    let pub_key = body.public_key.trim();
+    let rp_id = body.rp_id.trim();
+    if cred_id.is_empty() || pub_key.is_empty() || rp_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Thiếu thông tin passkey"}))).into_response();
+    }
+    let device_name = body
+        .device_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Passkey")
+        .chars()
+        .take(64)
+        .collect::<String>();
+    let transports = body.transports.unwrap_or_default();
+    let counter = body.counter.unwrap_or(0).max(0);
+    let Ok(conn) = st.ctx.db.conn() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "DB error"}))).into_response();
+    };
+    match conn
+        .execute(
+            "INSERT INTO web_passkeys (user_id, credential_id, public_key, counter, transports, rp_id, device_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (uid, cred_id, pub_key, counter, transports.as_str(), rp_id, device_name.as_str()),
+        )
+        .await
+    {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => {
+            tracing::warn!("Insert passkey error: {}", e);
+            (StatusCode::CONFLICT, Json(json!({"error": "Passkey đã tồn tại hoặc lỗi lưu dữ liệu"}))).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeletePasskeyBody {
+    user_id: Option<i64>,
+    passkey_id: i64,
+}
+
+async fn ah_pub_account_passkey_delete(
+    headers: HeaderMap,
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<DeletePasskeyBody>,
+) -> impl IntoResponse {
+    let Some((uid, _)) = resolve_account_uid(&headers, &st, body.user_id).await else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    };
+    let Ok(conn) = st.ctx.db.conn() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "DB error"}))).into_response();
+    };
+    let affected = conn
+        .execute(
+            "DELETE FROM web_passkeys WHERE id = ?1 AND user_id = ?2",
+            (body.passkey_id, uid),
+        )
+        .await
+        .unwrap_or(0);
+    if affected == 0 {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "Không tìm thấy passkey"}))).into_response();
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct PasskeyLookupBody {
+    credential_id: String,
+    rp_id: String,
+}
+
+async fn ah_auth_passkey_lookup(
+    headers: HeaderMap,
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<PasskeyLookupBody>,
+) -> impl IntoResponse {
+    if !check_admin_auth(&headers, &st.ctx.config.api_key) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Ok(conn) = st.ctx.db.conn() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "DB error"}))).into_response();
+    };
+    if let Ok(mut rows) = conn
+        .query(
+            "SELECT p.user_id, p.credential_id, p.public_key, p.counter, p.transports, p.rp_id, u.username, u.email, u.is_admin, u.avatar FROM web_passkeys p JOIN web_users u ON u.id = p.user_id WHERE p.credential_id = ?1 AND p.rp_id = ?2 LIMIT 1",
+            (body.credential_id.trim(), body.rp_id.trim()),
+        )
+        .await
+    {
+        if let Ok(Some(r)) = rows.next().await {
+            return Json(json!({
+                "passkey": {
+                    "user_id": r.get::<i64>(0).unwrap_or(0),
+                    "credential_id": r.get::<String>(1).unwrap_or_default(),
+                    "public_key": r.get::<String>(2).unwrap_or_default(),
+                    "counter": r.get::<i64>(3).unwrap_or(0),
+                    "transports": r.get::<String>(4).unwrap_or_default(),
+                    "rp_id": r.get::<String>(5).unwrap_or_default(),
+                },
+                "user": {
+                    "id": r.get::<i64>(0).unwrap_or(0),
+                    "username": r.get::<String>(6).unwrap_or_default(),
+                    "email": r.get::<String>(7).unwrap_or_default(),
+                    "is_admin": r.get::<i64>(8).unwrap_or(0) == 1,
+                    "avatar": r.get::<Option<String>>(9).ok().flatten(),
+                }
+            }))
+            .into_response();
+        }
+    }
+    (StatusCode::NOT_FOUND, Json(json!({"error": "Passkey không tồn tại cho domain này"}))).into_response()
+}
+
+#[derive(Deserialize)]
+struct PasskeyCounterBody {
+    credential_id: String,
+    counter: i64,
+}
+
+async fn ah_auth_passkey_counter(
+    headers: HeaderMap,
+    State(st): State<Arc<ApiState>>,
+    Json(body): Json<PasskeyCounterBody>,
+) -> impl IntoResponse {
+    if !check_admin_auth(&headers, &st.ctx.config.api_key) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "Unauthorized"}))).into_response();
+    }
+    let Ok(conn) = st.ctx.db.conn() else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "DB error"}))).into_response();
+    };
+    let _ = conn
+        .execute(
+            "UPDATE web_passkeys SET counter = ?1 WHERE credential_id = ?2",
+            (body.counter.max(0), body.credential_id.trim()),
+        )
+        .await;
+    Json(json!({ "ok": true })).into_response()
 }
