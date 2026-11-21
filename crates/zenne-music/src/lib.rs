@@ -269,7 +269,9 @@ impl MusicManager {
                 return Err(format!("SoundCloud API trả về HTTP {}", res.status()));
             }
             let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-            if json["kind"].as_str() == Some("playlist") {
+            if matches!(json["kind"].as_str(), Some("playlist" | "system-playlist"))
+                || json["tracks"].is_array()
+            {
                 let playlist_title = json["title"].as_str().map(|s| s.to_string());
                 let raw_tracks = json["tracks"]
                     .as_array()
